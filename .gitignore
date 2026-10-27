@@ -1,0 +1,8 @@
+# build output
+/miniray
+/miniray.exe
+# test output
+*.test
+*.out
+# local data
+/tmp/
