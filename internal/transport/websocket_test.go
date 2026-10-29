@@ -307,7 +307,10 @@ func readString(t *testing.T, r io.Reader, want string) {
 	}
 }
 
-func TestWebSocketWaitsForClient(t *testing.T) {
+// The close that ends a stream follows the response: a client that reads late,
+// after Join has closed its idle stream, still gets the whole response, then
+// EOF.
+func TestWebSocketCloseFollowsResponse(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		srv, targetDone, joined := joinedServer(t, "response")
 		conn, err := dial(t, t.Context(), srv)
@@ -316,44 +319,12 @@ func TestWebSocketWaitsForClient(t *testing.T) {
 		}
 		defer conn.Close()
 		<-targetDone
-		synctest.Wait()
-
-		// The target's EOF must not end the stream before the client reads.
-		select {
-		case <-joined:
-			t.Fatal("stream ended before the client read the response")
-		default:
-		}
+		// Past Join's one-second linger, so that the client reads only after Join
+		// has closed the stream.
 		synctest.Sleep(2 * time.Second)
-		select {
-		case <-joined:
-			t.Fatal("stream ended while the client was idle")
-		default:
-		}
 		readString(t, conn, "response")
-		// An early WS close can leave the server waiting for an acknowledgment,
-		// so server liveness alone does not prove the client still has a stream.
-		type result struct {
-			n   int
-			err error
-		}
-		next := make(chan result, 1)
-		go func() {
-			var b [1]byte
-			n, err := conn.Read(b[:])
-			next <- result{n, err}
-		}()
-		synctest.Wait()
-		select {
-		case got := <-next:
-			t.Fatalf("stream ended before the client closed: %d bytes, %v", got.n, got.err)
-		default:
-		}
-		if err := conn.Close(); err != nil {
-			t.Fatal(err)
-		}
-		if got := <-next; got.n != 0 || got.err == nil {
-			t.Errorf("read after client close = %d, %v; want connection error", got.n, got.err)
+		if n, err := conn.Read(make([]byte, 1)); n != 0 || err != io.EOF {
+			t.Fatalf("read after the response = %d, %v; want EOF", n, err)
 		}
 		<-joined
 	})

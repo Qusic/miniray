@@ -3,87 +3,142 @@
 package netutil
 
 import (
-	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"time"
 )
 
-// drainTimeout bounds how long Join waits for a stream that cannot half-close,
-// such as WebSocket, to finish after the other side has. Its client is
-// typically still consuming the response, which clients such as V2Ray drop if
-// the WebSocket closes first. This is a resource bound, not proof of delivery.
-const drainTimeout = 30 * time.Second
+// Join's idle limits, once one direction has finished:
+//   - lingerTimeout, after the target has. Closing is how the client learns
+//     that the response is complete, but clients such as V2Ray drop what they
+//     have not yet delivered when the WebSocket closes. Shadowrocket is closed
+//     source and may do the same, so every client gets a moment first, as
+//     long as V2Ray and Xray servers give.
+//   - drainTimeout, after the client has, while the target's response may
+//     still be coming. It bounds resources; it is no proof of delivery.
+const (
+	lingerTimeout = time.Second
+	drainTimeout  = 30 * time.Second
+)
 
-var errDrainTimeout = errors.New("netutil: timed out waiting for the other direction")
+var errDrainTimeout = fmt.Errorf(
+	"netutil: target sent nothing for %v after the client finished sending",
+	drainTimeout,
+)
 
-type closeWriter interface {
-	CloseWrite() error
-}
-
-// Join copies in both directions and takes ownership of a and b. Their Close
-// methods must eventually unblock pending I/O; bounded protocol handshakes are
-// allowed. CloseWrite, if supported, must return without waiting for the peer.
+// Join copies between a client's stream and its target's in both directions,
+// and takes ownership of both. Their Close methods must eventually unblock
+// pending I/O, though bounded protocol handshakes are allowed; CloseWrite, if
+// any, must not wait for the peer.
 //
-// When one direction reaches EOF, Join follows what the streams support:
-//   - A stream with CloseWrite half-closes, so its EOF only ends its sending.
-//     Join passes the EOF on and keeps the other direction open as long as it
-//     lasts, or for at most 30 seconds if the other stream cannot half-close
-//     and so cannot learn of the EOF.
-//   - A stream without CloseWrite has no half-close, so its EOF means it is
-//     finished and nothing more can reach it. Join ends at once.
+// A stream with CloseWrite can half-close, so its EOF only ends its sending.
+// If the other stream can half-close too, Join passes the EOF on, and the
+// other direction goes on as long as it lasts. If not, the other stream never
+// learns of the EOF, so its direction goes on only until it has been idle for
+// lingerTimeout after the target's EOF, or drainTimeout after the client's.
+// Idleness counts from the EOF at the earliest; a connection that is merely
+// idle stays open. A stream without CloseWrite is gone after its EOF, and Join
+// ends at once.
 //
-// The drain timer starts at that first EOF, not at connection establishment or
-// while a stream is idle. A copy or half-close error, or the drain timeout,
-// stops both directions. Join closes both streams concurrently and waits for
-// all copy tasks to exit; the time spent closing is additional to the drain.
-func Join(a, b io.ReadWriteCloser) error {
+// Join returns the first copy or half-close error, or an error if the drain
+// runs out; the linger running out is a normal end. It closes both streams
+// concurrently and waits for all copying to stop before returning.
+func Join(client, target io.ReadWriteCloser) error {
 	var wg sync.WaitGroup
 	defer func() {
-		wg.Go(func() { a.Close() })
-		wg.Go(func() { b.Close() })
+		wg.Go(func() { client.Close() })
+		wg.Go(func() { target.Close() })
 		wg.Wait()
 	}()
 
-	type result struct {
-		from, to io.ReadWriteCloser
-		err      error
-	}
-	done := make(chan result, 2)
-	wg.Go(func() { done <- result{from: b, to: a, err: forward(a, b)} })
-	wg.Go(func() { done <- result{from: a, to: b, err: forward(b, a)} })
+	// A direction from a stream that can half-close is never waited on, so it
+	// skips tracking idleness, and io.Copy can still splice between TCP
+	// streams.
+	_, clientHalfCloses := client.(closeWriter)
+	_, targetHalfCloses := target.(closeWriter)
+	request := &direction{from: client, to: target, trackIdle: !clientHalfCloses}
+	response := &direction{from: target, to: client, trackIdle: !targetHalfCloses}
+	requestDone, responseDone := make(chan error, 1), make(chan error, 1)
+	wg.Go(func() { requestDone <- request.copy() })
+	wg.Go(func() { responseDone <- response.copy() })
 
-	first := <-done
-	// The direction to → from is still running, but only worth it while
-	// from is listening: a stream without half-close is gone after its EOF.
-	if first.err != nil || !halfCloses(first.from) {
-		return first.err
-	}
-	// to finishes on its own once it learns of the EOF, which needs
-	// half-close; otherwise it gets drainTimeout to finish.
-	var timeout <-chan time.Time // nil waits as long as the other direction lasts.
-	if !halfCloses(first.to) {
-		timeout = time.After(drainTimeout)
-	}
 	select {
-	case second := <-done:
-		return second.err
-	case <-timeout:
-		return errDrainTimeout
-	}
-}
-
-func halfCloses(s io.ReadWriteCloser) bool {
-	_, ok := s.(closeWriter)
-	return ok
-}
-
-func forward(dst io.Writer, src io.Reader) error {
-	if _, err := io.Copy(dst, src); err != nil {
+	case err := <-responseDone:
+		if err == nil && targetHalfCloses {
+			if clientHalfCloses {
+				return <-requestDone
+			}
+			return request.wait(requestDone, lingerTimeout, nil)
+		}
+		return err
+	case err := <-requestDone:
+		if err == nil && clientHalfCloses {
+			if targetHalfCloses {
+				return <-responseDone
+			}
+			return response.wait(responseDone, drainTimeout, errDrainTimeout)
+		}
 		return err
 	}
-	if c, ok := dst.(closeWriter); ok {
+}
+
+// direction copies one way through a Join. With trackIdle, it records when
+// from last yielded data.
+type direction struct {
+	from      io.Reader
+	to        io.Writer
+	trackIdle bool
+
+	mu       sync.Mutex
+	lastRead time.Time
+}
+
+func (d *direction) copy() error {
+	var src io.Reader = d.from
+	if d.trackIdle {
+		src = d
+	}
+	if _, err := io.Copy(d.to, src); err != nil {
+		return err
+	}
+	if c, ok := d.to.(closeWriter); ok {
 		return c.CloseWrite()
 	}
 	return nil
+}
+
+func (d *direction) Read(p []byte) (int, error) {
+	n, err := d.from.Read(p)
+	if n > 0 {
+		d.mu.Lock()
+		d.lastRead = time.Now()
+		d.mu.Unlock()
+	}
+	return n, err
+}
+
+// wait returns what done reports, or idleErr once d has moved no data for
+// limit, counting from the call at the earliest.
+func (d *direction) wait(done <-chan error, limit time.Duration, idleErr error) error {
+	timer := time.NewTimer(limit)
+	defer timer.Stop()
+	for {
+		select {
+		case err := <-done:
+			return err
+		case <-timer.C:
+			d.mu.Lock()
+			idle := time.Since(d.lastRead)
+			d.mu.Unlock()
+			if idle >= limit {
+				return idleErr
+			}
+			timer.Reset(limit - idle)
+		}
+	}
+}
+
+type closeWriter interface {
+	CloseWrite() error
 }

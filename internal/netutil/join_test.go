@@ -70,58 +70,44 @@ func eof(t *testing.T, r io.Reader) {
 	}
 }
 
-func TestJoin(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		client, a := pipePair(t)
-		b, target := pipePair(t)
-		done := start(a, b)
+// Between two half-closing streams, the EOF of the side that finishes first is
+// passed on, and the other direction may take arbitrarily long: no linger or
+// drain bound applies.
+func TestJoinWaitsBetweenHalfClosingStreams(t *testing.T) {
+	for _, first := range []string{"client", "target"} {
+		t.Run(first+" finishes first", func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				client, a := pipePair(t)
+				b, target := pipePair(t)
+				done := start(a, b)
+				finished, other := client, target
+				if first == "target" {
+					finished, other = target, client
+				}
+				finished.CloseWrite()
+				eof(t, other)
 
-		for _, direction := range []struct{ from, to *halfPipe }{{client, target}, {target, client}} {
-			written := send(direction.from, []byte("hello"))
-			read(t, direction.to, []byte("hello"))
-			if err := <-written; err != nil {
-				t.Fatal(err)
-			}
-		}
-		client.CloseWrite()
-		eof(t, target)
-		target.CloseWrite()
-		eof(t, client)
-		if err := <-done; err != nil {
-			t.Fatal(err)
-		}
-	})
-}
-
-func TestJoinWaitsForHalfClosedResponse(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		client, a := pipePair(t)
-		b, target := pipePair(t)
-		done := start(a, b)
-		client.CloseWrite()
-		eof(t, target)
-
-		// The request is finished, but its response may take arbitrarily long:
-		// between two half-closing streams no drain bound applies.
-		synctest.Sleep(time.Hour)
-		written := send(target, []byte("response"))
-		read(t, client, []byte("response"))
-		if err := <-written; err != nil {
-			t.Fatal(err)
-		}
-		target.CloseWrite()
-		eof(t, client)
-		if err := <-done; err != nil {
-			t.Fatal(err)
-		}
-	})
+				synctest.Sleep(time.Hour)
+				written := send(other, []byte("late"))
+				read(t, finished, []byte("late"))
+				if err := <-written; err != nil {
+					t.Fatal(err)
+				}
+				other.CloseWrite()
+				eof(t, finished)
+				if err := <-done; err != nil {
+					t.Fatal(err)
+				}
+			})
+		})
+	}
 }
 
 func TestJoinBackpressure(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		client, a := pipePair(t)
 		b, target := pipePair(t)
-		done := start(a, b)
+		start(a, b)
 		payload := bytes.Repeat([]byte("x"), 1<<20)
 		written := send(client, payload)
 		synctest.Wait()
@@ -134,38 +120,50 @@ func TestJoinBackpressure(t *testing.T) {
 		if err := <-written; err != nil {
 			t.Fatal(err)
 		}
-		client.CloseWrite()
-		eof(t, target)
-		target.CloseWrite()
-		eof(t, client)
-		if err := <-done; err != nil {
-			t.Fatal(err)
-		}
 	})
 }
 
+// A stream without half-close is gone after its EOF and nothing more can reach
+// it, so Join closes the other stream at once instead of leaving it to finish.
 func TestJoinEndsWhenStreamWithoutHalfCloseEnds(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		client, a := net.Pipe()
-		b, target := pipePair(t)
-		done := start(a, b)
-		start := time.Now()
-		// The client is gone and nothing more can reach it, so the target is
-		// closed at once instead of being left to finish.
-		client.Close()
-		if err := <-done; err != nil {
-			t.Fatal(err)
-		}
-		if elapsed := time.Since(start); elapsed != 0 {
-			t.Errorf("Join took %v after the client closed", elapsed)
-		}
-		if _, err := target.Write([]byte("late")); err == nil {
-			t.Error("target still open after the client closed")
-		}
-	})
+	for _, gone := range []string{"client", "target"} {
+		t.Run(gone+" ends", func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				// The stream that ends cannot half-close; the other can.
+				var client, a, b, target io.ReadWriteCloser
+				if gone == "client" {
+					client, a = net.Pipe()
+					b, target = pipePair(t)
+				} else {
+					client, a = pipePair(t)
+					b, target = net.Pipe()
+				}
+				ends, other := client, target
+				if gone == "target" {
+					ends, other = target, client
+				}
+				done := start(a, b)
+				start := time.Now()
+				ends.Close()
+				if err := <-done; err != nil {
+					t.Fatal(err)
+				}
+				if elapsed := time.Since(start); elapsed != 0 {
+					t.Errorf("Join took %v after the %s ended", elapsed, gone)
+				}
+				if _, err := other.Write([]byte("late")); err == nil {
+					t.Errorf("the other stream is still open after the %s ended", gone)
+				}
+			})
+		})
+	}
 }
 
-func TestJoinDrainTimeout(t *testing.T) {
+// A client whose stream cannot half-close learns that the target finished only
+// when Join closes the stream. Join keeps it open while the client still sends,
+// and closes it once the client has been idle for lingerTimeout; the close is a
+// normal end.
+func TestJoinLinger(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		client, a := net.Pipe()
 		b, target := pipePair(t)
@@ -179,45 +177,96 @@ func TestJoinDrainTimeout(t *testing.T) {
 			t.Fatalf("idle connection ended: %v", err)
 		default:
 		}
-		// The client cannot learn that the target finished, so it gets
-		// drainTimeout to finish on its own.
-		start := time.Now()
 		target.CloseWrite()
-		if err := <-done; !errors.Is(err, errDrainTimeout) {
-			t.Fatalf("Join = %v, want errDrainTimeout", err)
+		// Sending keeps the client's direction going past lingerTimeout.
+		for range 3 {
+			synctest.Sleep(lingerTimeout * 3 / 5)
+			written := send(client, []byte("late"))
+			read(t, target, []byte("late"))
+			if err := <-written; err != nil {
+				t.Fatal(err)
+			}
 		}
-		if elapsed := time.Since(start); elapsed != drainTimeout {
-			t.Errorf("drain took %v, want %v", elapsed, drainTimeout)
+		last := time.Now()
+		if err := <-done; err != nil {
+			t.Fatalf("Join = %v, want nil", err)
+		}
+		if idle := time.Since(last); idle != lingerTimeout {
+			t.Errorf("Join ended after %v idle, want %v", idle, lingerTimeout)
 		}
 		eof(t, client)
 	})
 }
 
-func TestJoinDrainEndsWhenClientFinishes(t *testing.T) {
+// A target whose stream cannot half-close never learns that the client finished
+// sending. Its response still reaches the client, and Join keeps going while it
+// comes; a target idle for drainTimeout is an error.
+func TestJoinDrainTimeout(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		client, a := net.Pipe()
-		b, target := pipePair(t)
+		client, a := pipePair(t)
+		b, target := net.Pipe()
+		defer target.Close()
 		done := start(a, b)
-		start := time.Now()
-		target.CloseWrite()
-		synctest.Wait()
-		select {
-		case err := <-done:
-			t.Fatalf("Join returned before the client finished: %v", err)
-		default:
+		client.CloseWrite()
+		// The response keeps the target's direction going past drainTimeout.
+		for range 3 {
+			synctest.Sleep(drainTimeout * 3 / 5)
+			written := send(target, []byte("response"))
+			read(t, client, []byte("response"))
+			if err := <-written; err != nil {
+				t.Fatal(err)
+			}
 		}
-		client.Close()
-		if err := <-done; err != nil {
-			t.Fatal(err)
+		last := time.Now()
+		if err := <-done; !errors.Is(err, errDrainTimeout) {
+			t.Fatalf("Join = %v, want errDrainTimeout", err)
 		}
-		if elapsed := time.Since(start); elapsed != 0 {
-			t.Errorf("Join took %v after both directions ended", elapsed)
+		if idle := time.Since(last); idle != drainTimeout {
+			t.Errorf("Join ended after %v idle, want %v", idle, drainTimeout)
 		}
+		eof(t, target)
 	})
 }
 
+// While Join waits on a direction, it ends as soon as that direction ends,
+// without waiting out the idle limit.
+func TestJoinEndsWhenWaitedDirectionEnds(t *testing.T) {
+	for _, limit := range []string{"linger", "drain"} {
+		t.Run(limit, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				var a, b io.ReadWriteCloser
+				var finished *halfPipe // half-closes first
+				var waited net.Conn    // cannot half-close, so Join waits on it
+				if limit == "linger" {
+					waited, a = net.Pipe()
+					b, finished = pipePair(t)
+				} else {
+					finished, a = pipePair(t)
+					b, waited = net.Pipe()
+				}
+				done := start(a, b)
+				start := time.Now()
+				finished.CloseWrite()
+				synctest.Wait()
+				select {
+				case err := <-done:
+					t.Fatalf("Join returned while waiting: %v", err)
+				default:
+				}
+				waited.Close()
+				if err := <-done; err != nil {
+					t.Fatal(err)
+				}
+				if elapsed := time.Since(start); elapsed != 0 {
+					t.Errorf("Join took %v after both directions ended", elapsed)
+				}
+			})
+		})
+	}
+}
+
 func TestJoinError(t *testing.T) {
-	for _, phase := range []string{"first", "during drain"} {
+	for _, phase := range []string{"first", "during linger"} {
 		t.Run(phase, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				client, a := net.Pipe()
@@ -225,7 +274,7 @@ func TestJoinError(t *testing.T) {
 				defer client.Close()
 				done := start(a, b)
 				start := time.Now()
-				if phase == "during drain" {
+				if phase == "during linger" {
 					target.CloseWrite()
 					synctest.Wait()
 				}
@@ -251,15 +300,27 @@ type closeWriteFailure struct{ *halfPipe }
 func (closeWriteFailure) CloseWrite() error { return errCloseWrite }
 
 func TestJoinCloseWriteError(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		client, a := pipePair(t)
-		b, _ := pipePair(t)
-		client.CloseWrite()
-		if err := Join(a, closeWriteFailure{b}); !errors.Is(err, errCloseWrite) {
-			t.Fatalf("Join = %v, want half-close error", err)
-		}
-		eof(t, client)
-	})
+	for _, failing := range []string{"target", "client"} {
+		t.Run(failing+" fails to half-close", func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				// One side finishes, and passing its EOF on to the other
+				// fails.
+				client, a := pipePair(t)
+				b, target := pipePair(t)
+				finished := client
+				var joinClient, joinTarget io.ReadWriteCloser = a, closeWriteFailure{b}
+				if failing == "client" {
+					finished = target
+					joinClient, joinTarget = closeWriteFailure{a}, b
+				}
+				finished.CloseWrite()
+				if err := Join(joinClient, joinTarget); !errors.Is(err, errCloseWrite) {
+					t.Fatalf("Join = %v, want half-close error", err)
+				}
+				eof(t, finished)
+			})
+		})
+	}
 }
 
 type closeTogether struct {
@@ -286,7 +347,7 @@ func TestJoinClosesBothConcurrently(t *testing.T) {
 			t.Fatal(err)
 		}
 		if err := <-done; !errors.Is(err, os.ErrDeadlineExceeded) {
-			t.Fatal(err)
+			t.Fatalf("Join = %v, want deadline exceeded", err)
 		}
 		eof(t, client)
 		eof(t, target)
