@@ -3,6 +3,7 @@ package tunnel
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"slices"
 	"strings"
@@ -61,6 +62,64 @@ func TestSpokeReconnects(t *testing.T) {
 		want := []time.Duration{0, 1 * s, 3 * s, 7 * s, 15 * s, 31 * s, 61 * s, 91 * s, 92 * s, 94 * s}
 		if !slices.Equal(attempts, want) {
 			t.Errorf("attempts at %v, want %v", attempts, want)
+		}
+	})
+}
+
+// halfConn is one end of a connection with real half-close, like TCP, built
+// from two one-way net.Pipes.
+type halfConn struct {
+	net.Conn // reads
+	writer   net.Conn
+}
+
+func halfPair() (*halfConn, *halfConn) {
+	r1, w1 := net.Pipe()
+	r2, w2 := net.Pipe()
+	return &halfConn{r1, w2}, &halfConn{r2, w1}
+}
+
+func (c *halfConn) Write(b []byte) (int, error) { return c.writer.Write(b) }
+func (c *halfConn) CloseWrite() error           { return c.writer.Close() }
+func (c *halfConn) Close() error                { return errors.Join(c.Conn.Close(), c.writer.Close()) }
+
+// The alias is the target of the stream the hub asked for: once the alias has
+// finished, the stream, which cannot half-close, ends within a moment, rather
+// than after the long wait that Join gives a target's response.
+func TestSpokeEndsStreamSoonAfterAlias(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		hub := NewHub("hub", quiet)
+		spoke, _ := spokeServing(t, hub, "lab")
+		alias, server := halfPair()
+		defer server.Close()
+		spoke.DialAlias = func(context.Context, netutil.Label, uint16) (net.Conn, error) {
+			return alias, nil
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		go spoke.Run(ctx)
+		synctest.Wait()
+		conn, err := hub.Dial(t.Context(), "lab", "nas", 22)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+
+		go func() {
+			server.Write([]byte("response"))
+			server.CloseWrite()
+		}()
+		got := make([]byte, len("response"))
+		if _, err := io.ReadFull(conn, got); err != nil || string(got) != "response" {
+			t.Fatalf("read %q, %v; want the response", got, err)
+		}
+		start := time.Now()
+		if n, err := conn.Read(make([]byte, 1)); n != 0 || err != io.EOF {
+			t.Fatalf("read %d, %v after the response; want EOF", n, err)
+		}
+		// Join lingers about a second, and would give a response half a minute.
+		if elapsed := time.Since(start); elapsed > 5*time.Second {
+			t.Errorf("stream ended %v after the alias finished, want within a moment", elapsed)
 		}
 	})
 }

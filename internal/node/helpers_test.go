@@ -3,6 +3,7 @@ package node
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -29,6 +30,23 @@ func echo() net.Conn {
 	}()
 	return conn
 }
+
+// halfConn is one end of a connection with real half-close, like TCP, built
+// from two one-way net.Pipes.
+type halfConn struct {
+	net.Conn // reads
+	writer   net.Conn
+}
+
+func halfPair() (*halfConn, *halfConn) {
+	r1, w1 := net.Pipe()
+	r2, w2 := net.Pipe()
+	return &halfConn{r1, w2}, &halfConn{r2, w1}
+}
+
+func (c *halfConn) Write(b []byte) (int, error) { return c.writer.Write(b) }
+func (c *halfConn) CloseWrite() error           { return c.writer.Close() }
+func (c *halfConn) Close() error                { return errors.Join(c.Conn.Close(), c.writer.Close()) }
 
 // echoServer reports each requested target and joins the stream with an echo.
 func echoServer(t *testing.T, trojan protocol.Trojan) (*httptest.Server, <-chan string) {

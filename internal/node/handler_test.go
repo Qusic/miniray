@@ -270,6 +270,36 @@ func TestHTTPProxyHandler(t *testing.T) {
 	})
 }
 
+// The stream of a CONNECT request is the client: once it has sent its request
+// and half-closed, a target that cannot half-close may still take a while to
+// respond.
+func TestHTTPProxyConnectWaitsForResponse(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		target, server := net.Pipe()
+		defer server.Close()
+		proxy := httptest.NewTestServer(t, newHTTPProxyHandler(func(context.Context, netutil.Address, uint16) (net.Conn, error) {
+			return target, nil
+		}, quiet))
+		conn, err := memoryDial(proxy)(t.Context(), domainAddress(t, "proxy.example.com"), 3128)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		status, reader := connect(t, conn, "ssh.example.com:22", "request")
+		if status != http.StatusOK {
+			t.Fatalf("CONNECT = %d, want 200", status)
+		}
+		if err := conn.(interface{ CloseWrite() error }).CloseWrite(); err != nil {
+			t.Fatal(err)
+		}
+		read(t, server, "request")
+		// Join gives a response half a minute, and lingers only about a second.
+		time.Sleep(10 * time.Second)
+		write(t, server, []byte("response"))
+		read(t, reader, "response")
+	})
+}
+
 // testListener accepts the connections and reports the errors that a test
 // sends it, until the test closes it.
 type testListener struct {
@@ -354,5 +384,34 @@ func TestTCPHandler(t *testing.T) {
 		if want := []string{"ssh.example.com:22", "ssh.example.com:22", "ssh.example.com:22"}; !slices.Equal(dialed, want) {
 			t.Errorf("dialed %q, want %q", dialed, want)
 		}
+	})
+}
+
+// The accepted connection is the client: once it has sent its request and
+// half-closed, a target that cannot half-close may still take a while to
+// respond.
+func TestTCPHandlerWaitsForResponse(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		target, server := net.Pipe()
+		defer server.Close()
+		h := tcpHandler{
+			host: domainAddress(t, "ssh.example.com"),
+			port: 22,
+			dial: func(context.Context, netutil.Address, uint16) (net.Conn, error) { return target, nil },
+			log:  quiet,
+		}
+		client, accepted := halfPair()
+		defer client.Close()
+		go h.handle(accepted)
+
+		write(t, client, []byte("request"))
+		if err := client.CloseWrite(); err != nil {
+			t.Fatal(err)
+		}
+		read(t, server, "request")
+		// Join gives a response half a minute, and lingers only about a second.
+		time.Sleep(10 * time.Second)
+		write(t, server, []byte("response"))
+		read(t, client, "response")
 	})
 }

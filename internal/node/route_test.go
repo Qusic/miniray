@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/Qusic/miniray/internal/netutil"
 	"github.com/Qusic/miniray/internal/protocol"
@@ -88,6 +90,51 @@ func TestRouteTunnelReachesSpokes(t *testing.T) {
 		}
 		read(t, conn, "hello")
 	})
+}
+
+// The dialed connection is the target: once it has finished, the client's
+// stream, which cannot half-close, ends within a moment, rather than after the
+// long wait that Join gives a target's response. The target is a real TCP
+// server, since these routes dial directly, so this test takes real time.
+func TestRoutesEndSoonAfterTarget(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			c.Write([]byte("response"))
+			c.Close()
+		}
+	}()
+	host, port := ipAddress(t, "127.0.0.1"), uint16(l.Addr().(*net.TCPAddr).Port)
+	for name, route := range map[string]routeFunc{
+		"direct": routeDirect,
+		"tunnel": router{}.routeTunnel,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			conn, client := net.Pipe()
+			defer client.Close()
+			go route(t.Context(), conn, host, port)
+			read(t, client, "response")
+			start := time.Now()
+			client.SetReadDeadline(start.Add(10 * time.Second))
+			if n, err := client.Read(make([]byte, 1)); n != 0 || err != io.EOF {
+				t.Fatalf("client read %d, %v after the response; want EOF", n, err)
+			}
+			// Join lingers about a second, and would give a response half a
+			// minute.
+			if elapsed := time.Since(start); elapsed > 5*time.Second {
+				t.Errorf("stream ended %v after the target finished, want within a moment", elapsed)
+			}
+		})
+	}
 }
 
 // dialTunnel reaches the node's own aliases directly and other nodes' through
