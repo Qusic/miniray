@@ -61,7 +61,7 @@ func (s Spoke) Run(ctx context.Context) error {
 
 // session registers once and serves the hub until the control stream ends.
 // registered reports whether the hub accepted the registration, which it
-// acknowledges with its first message.
+// acknowledges with a ready message.
 func (s Spoke) session(ctx context.Context) (registered bool, err error) {
 	conn, err := s.dialHub(ctx, Target{Kind: Control, Node: s.Name})
 	if err != nil {
@@ -69,11 +69,11 @@ func (s Spoke) session(ctx context.Context) (registered bool, err error) {
 	}
 	c := newControl(conn)
 	err = c.run(ctx, func(m message) {
-		if !registered {
+		switch m.Type {
+		case typeReady:
 			registered = true
 			s.Log.Info("registered with the hub")
-		}
-		if m.Type == typeOpen {
+		case typeOpen:
 			go s.open(ctx, c, m)
 		}
 	})

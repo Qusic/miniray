@@ -3,7 +3,8 @@
 // reach one of the spoke's aliases, the hub asks over that stream, and the
 // spoke dials the alias and opens a data stream back. Streams and dial
 // functions come from the caller, so this package knows nothing of WebSocket,
-// Trojan, or the config.
+// Trojan, or the config. Nor does it check that a peer is still there: a
+// stream whose peer has vanished must fail on its own.
 package tunnel
 
 import (

@@ -15,8 +15,8 @@ import (
 
 // The delay before each new attempt doubles up to maxBackoff, whether the hub
 // was unreachable or rejected the registration by closing the stream, and
-// starts over once the hub has acknowledged a registration. Run ends with the
-// cause of its context.
+// starts over once the hub has acknowledged a registration with a ready
+// message. Run ends with the cause of its context.
 func TestSpokeReconnects(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		start := time.Now()
@@ -32,16 +32,21 @@ func TestSpokeReconnects(t *testing.T) {
 				}
 				attempts = append(attempts, time.Since(start))
 				conn, hub := net.Pipe()
-				switch len(attempts) {
-				case 1, 3, 5, 7:
-					return nil, errors.New("hub unreachable")
-				case 8:
-					// Accepted: the hub acknowledges, then the stream drops.
+				// reply has the hub send line, then drop the stream.
+				reply := func(line string) (net.Conn, error) {
 					go func() {
-						hub.Write([]byte(`{"type":"ping"}` + "\n"))
+						hub.Write([]byte(line + "\n"))
 						hub.Close()
 					}()
 					return conn, nil
+				}
+				switch len(attempts) {
+				case 1, 3, 5, 7:
+					return nil, errors.New("hub unreachable")
+				case 6:
+					return reply(`{"type":"later"}`) // no acknowledgment
+				case 8:
+					return reply(`{"type":"ready"}`) // accepted
 				case 10:
 					cancel(stop)
 				}

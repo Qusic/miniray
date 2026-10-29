@@ -1,18 +1,14 @@
 package tunnel
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"io"
 	"net"
-	"os"
 	"slices"
 	"strings"
 	"testing"
 	"testing/synctest"
-	"time"
-	"unicode/utf8"
 )
 
 // reading returns a control whose peer sends input and then closes.
@@ -32,9 +28,9 @@ func TestControlMessages(t *testing.T) {
 		line string
 		m    message
 	}{
+		{`{"type":"ready"}`, message{Type: typeReady}},
 		{`{"type":"open","id":7,"alias":"nas","port":22}`, message{Type: typeOpen, ID: 7, Alias: "nas", Port: 22}},
 		{`{"type":"fail","id":7,"error":"connection refused"}`, message{Type: typeFail, ID: 7, Error: "connection refused"}},
-		{`{"type":"ping"}`, message{Type: typePing}},
 	} {
 		conn, peer := net.Pipe()
 		go func() {
@@ -50,30 +46,59 @@ func TestControlMessages(t *testing.T) {
 	}
 }
 
-// run passes every message on in order, and ends with the cause of ctx,
-// closing the stream.
+// run passes messages on in order until ctx ends, and none after, even one it
+// has already read. It then returns the cause of ctx and closes the stream.
 func TestControlRun(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		conn, peer := net.Pipe()
-		ctx, cancel := context.WithCancelCause(t.Context())
-		stop := errors.New("stop")
-		var got []message
-		done := make(chan error)
-		go func() {
-			done <- newControl(conn).run(ctx, func(m message) {
-				got = append(got, m)
-				if len(got) == 3 {
-					cancel(stop)
+	lines := `{"type":"open","id":1,"alias":"nas","port":22}` + "\n" + `{"type":"later"}` + "\n" + `{"type":"ready"}` + "\n"
+	sent := []message{{Type: typeOpen, ID: 1, Alias: "nas", Port: 22}, {Type: "later"}, {Type: typeReady}}
+	for _, tt := range []struct {
+		name string
+		end  int // how many messages are handled before ctx ends
+	}{
+		{"while waiting", 3},
+		{"with a message read", 2},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				conn, peer := net.Pipe()
+				ctx, cancel := context.WithCancelCause(t.Context())
+				stop := errors.New("stop")
+				var got []message
+				done := make(chan error)
+				go func() {
+					done <- newControl(conn).run(ctx, func(m message) {
+						got = append(got, m)
+						if len(got) == tt.end {
+							cancel(stop)
+						}
+					})
+				}()
+				// One write, so that run has read every line when ctx ends early.
+				peer.Write([]byte(lines))
+				if err := <-done; err != stop {
+					t.Errorf("run = %v, want the cause %v", err, stop)
+				}
+				if want := sent[:tt.end]; !slices.Equal(got, want) {
+					t.Errorf("handled %+v, want %+v", got, want)
+				}
+				if n, err := peer.Read(make([]byte, 1)); n != 0 || err != io.EOF {
+					t.Errorf("peer read %d, %v after run; want the stream closed", n, err)
 				}
 			})
-		}()
-		peer.Write([]byte(`{"type":"open","id":1,"alias":"nas","port":22}` + "\n" + `{"type":"later"}` + "\n" + `{"type":"ping"}` + "\n"))
-		if err := <-done; err != stop {
-			t.Errorf("run = %v, want the cause %v", err, stop)
-		}
-		want := []message{{Type: typeOpen, ID: 1, Alias: "nas", Port: 22}, {Type: "later"}, {Type: typePing}}
-		if !slices.Equal(got, want) {
-			t.Errorf("handled %+v, want %+v", got, want)
+		})
+	}
+}
+
+// A stream that fails ends run with the error, and run closes it.
+func TestControlRunFails(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		conn, peer := net.Pipe()
+		go peer.Write([]byte("open\n"))
+		err := newControl(conn).run(t.Context(), func(m message) {
+			t.Errorf("handled %+v from a malformed line", m)
+		})
+		if err == nil || !strings.Contains(err.Error(), "malformed control message") {
+			t.Errorf("run = %v, want a malformed message", err)
 		}
 		if n, err := peer.Read(make([]byte, 1)); n != 0 || err != io.EOF {
 			t.Errorf("peer read %d, %v after run; want the stream closed", n, err)
@@ -81,95 +106,39 @@ func TestControlRun(t *testing.T) {
 	})
 }
 
-// Each side pings every pingInterval, and a stream that stays silent for
-// silenceTimeout is lost; every message from the peer restarts that timer.
-func TestControlHeartbeat(t *testing.T) {
-	for _, tt := range []struct {
-		name  string
-		sends []time.Duration // when the peer sends a message
-		end   time.Duration
-	}{
-		{"silent peer", nil, silenceTimeout},
-		{"messages restart the timer", []time.Duration{3 * time.Second, 8 * time.Second}, 8*time.Second + silenceTimeout},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				conn, peer := net.Pipe()
-				start := time.Now()
-				pings := make(chan time.Duration, 32)
-				go func() {
-					defer close(pings)
-					lines := bufio.NewReader(peer)
-					for {
-						line, err := lines.ReadString('\n')
-						if err != nil {
-							return
-						}
-						if line == `{"type":"ping"}`+"\n" {
-							pings <- time.Since(start)
-						}
-					}
-				}()
-				go func() {
-					for _, at := range tt.sends {
-						time.Sleep(at - time.Since(start))
-						peer.Write([]byte(`{"type":"ping"}` + "\n"))
-					}
-				}()
-
-				err := newControl(conn).run(t.Context(), func(message) {})
-				if !errors.Is(err, errSilent) || time.Since(start) != tt.end {
-					t.Errorf("run = %v after %v, want %v after %v", err, time.Since(start), errSilent, tt.end)
-				}
-				peer.Close()
-				var got, want []time.Duration
-				for at := range pings {
-					// A ping due at the very end may or may not go out.
-					if at < tt.end {
-						got = append(got, at)
-					}
-				}
-				for at := pingInterval; at < tt.end; at += pingInterval {
-					want = append(want, at)
-				}
-				if !slices.Equal(got, want) {
-					t.Errorf("pings at %v, want %v", got, want)
-				}
-			})
-		})
-	}
-}
-
-// A message too long for the peer to accept is never sent, and fail messages
-// trim their error text to fit.
+// The longest line the peer accepts is sent, one byte more is not, and fail
+// messages trim their error text to fit.
 func TestControlSendFitsMessages(t *testing.T) {
 	conn, peer := net.Pipe()
 	defer peer.Close()
-	c := newControl(conn)
-	long := errors.New(strings.Repeat("é", maxMessage))
-	if err := c.send(message{Type: typeFail, Error: long.Error()}); !errors.Is(err, errLongMessage) {
-		t.Fatalf("send of an oversized message = %v, want %v", err, errLongMessage)
+	c, p := newControl(conn), newControl(peer)
+	longest := message{Type: typeFail, Error: strings.Repeat("x", maxMessage-len(`{"type":"fail","error":""}`+"\n"))}
+	received := make(chan message, 1)
+	go func() {
+		m, _ := p.receive()
+		received <- m
+	}()
+	if err := c.send(longest); err != nil {
+		t.Fatalf("send of a %d-byte line = %v", maxMessage, err)
 	}
+	if got := <-received; got != longest {
+		t.Fatalf("a %d-byte line arrived with %d bytes of error text", maxMessage, len(got.Error))
+	}
+	longest.Error += "x"
+	if err := c.send(longest); !errors.Is(err, errLongMessage) {
+		t.Fatalf("send of a line one byte longer = %v, want %v", err, errLongMessage)
+	}
+
+	// The cut falls inside a character, whose remains are dropped.
+	long := errors.New("x" + strings.Repeat("é", maxMessage))
 	m := failMessage(7, long)
-	if len(m.Error) > maxErrorText || !utf8.ValidString(m.Error) || !strings.HasPrefix(long.Error(), m.Error) {
-		t.Fatalf("failMessage kept %d bytes of error text, valid UTF-8 %t", len(m.Error), utf8.ValidString(m.Error))
+	if want := long.Error()[:maxErrorText-1]; m.Error != want {
+		t.Fatalf("failMessage kept %d bytes of error text, want the first %d", len(m.Error), len(want))
 	}
 	go c.send(m)
-	if got, err := newControl(peer).receive(); err != nil || got != m {
+	if got, err := p.receive(); err != nil || got != m {
 		t.Errorf("trimmed fail message arrived as %+v, %v", got, err)
 	}
-}
-
-// A peer that stops reading is lost too: a write gives up after silenceTimeout.
-func TestControlSendGivesUp(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		conn, peer := net.Pipe()
-		defer peer.Close()
-		start := time.Now()
-		if err := newControl(conn).send(message{Type: typePing}); !errors.Is(err, os.ErrDeadlineExceeded) || time.Since(start) != silenceTimeout {
-			t.Errorf("send to a stalled peer = %v after %v, want a deadline error after %v", err, time.Since(start), silenceTimeout)
-		}
-	})
 }
 
 // Receivers ignore unknown fields, and pass unknown types on for the session
@@ -188,8 +157,8 @@ func TestControlReceiveAcceptsUnknown(t *testing.T) {
 
 func TestControlReceiveRejects(t *testing.T) {
 	// A line of exactly maxMessage bytes, newline included, is accepted.
-	padded := `{"type":"ping","pad":"` + strings.Repeat("x", maxMessage-len(`{"type":"ping","pad":""}`)-1) + `"}` + "\n"
-	if got, err := reading(t, padded).receive(); err != nil || got.Type != typePing {
+	padded := `{"type":"open","pad":"` + strings.Repeat("x", maxMessage-len(`{"type":"open","pad":""}`)-1) + `"}` + "\n"
+	if got, err := reading(t, padded).receive(); err != nil || got.Type != typeOpen {
 		t.Fatalf("receive of a %d-byte line = %+v, %v", len(padded), got, err)
 	}
 	for _, tt := range []struct {
@@ -197,9 +166,9 @@ func TestControlReceiveRejects(t *testing.T) {
 		want        error
 	}{
 		{"empty", "", io.EOF},
-		{"truncated", `{"type":"ping"}`, io.ErrUnexpectedEOF},
-		{"too long", strings.Repeat(" ", maxMessage) + `{"type":"ping"}` + "\n", errLongMessage},
-		{"not JSON", "ping\n", nil},
+		{"truncated", `{"type":"open"}`, io.ErrUnexpectedEOF},
+		{"too long", strings.Repeat(" ", maxMessage) + `{"type":"open"}` + "\n", errLongMessage},
+		{"not JSON", "open\n", nil},
 		{"not an object", "[]\n", nil},
 	} {
 		got, err := reading(t, tt.input).receive()

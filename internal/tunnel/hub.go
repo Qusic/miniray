@@ -83,7 +83,7 @@ func (h *Hub) Serve(ctx context.Context, conn net.Conn, t Target) error {
 }
 
 // register keeps spoke registered for as long as its control stream lasts.
-// The first message it sends acknowledges the registration; a rejected spoke
+// It acknowledges the registration with a ready message; a rejected spoke
 // gets none before its stream closes.
 func (h *Hub) register(ctx context.Context, conn net.Conn, spoke netutil.Label) error {
 	if spoke == h.self {
@@ -109,7 +109,7 @@ func (h *Hub) register(ctx context.Context, conn net.Conn, spoke netutil.Label) 
 	}
 	h.log.Info("spoke registered", "spoke", spoke, "replaced", old != nil)
 
-	if err := s.control.send(message{Type: typePing}); err != nil {
+	if err := s.control.send(message{Type: typeReady}); err != nil {
 		return fmt.Errorf("spoke %s: %w", spoke, err)
 	}
 	err := s.control.run(ctx, func(m message) {

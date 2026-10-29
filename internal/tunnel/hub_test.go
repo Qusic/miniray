@@ -60,9 +60,9 @@ func spokeServing(t *testing.T, hub *Hub, name netutil.Label) (Spoke, <-chan str
 	}, dialed
 }
 
-// rawSpoke plays a spoke by hand: it registers under a name, keeps the
-// heartbeat, and passes on what the hub sends besides pings. Serve's result
-// arrives on served once the registration ends. Closing the control ends it.
+// rawSpoke plays a spoke by hand: it registers under a name and passes on what
+// the hub sends besides the acknowledgment. Serve's result arrives on served
+// once the registration ends. Closing the control ends it.
 type rawSpoke struct {
 	control  *control
 	received chan message
@@ -81,26 +81,23 @@ func register(t *testing.T, hub *Hub, name netutil.Label) rawSpoke {
 	acked := make(chan struct{})
 	go func() {
 		s.control.run(context.Background(), func(m message) {
-			if m.Type == typePing {
-				select {
-				case <-acked:
-				default:
-					close(acked)
-				}
-				return
+			switch m.Type {
+			case typeReady:
+				close(acked)
+			default:
+				s.received <- m
 			}
-			s.received <- m
 		})
 		close(s.received)
 	}()
-	<-acked
+	await(t, acked)
 	if elapsed := time.Since(start); elapsed != 0 {
 		t.Errorf("registration acknowledged after %v, want at once", elapsed)
 	}
 	return s
 }
 
-// next returns the next message other than a ping.
+// next returns the next message other than the acknowledgment.
 func (s rawSpoke) next(t *testing.T) message {
 	t.Helper()
 	select {
@@ -115,8 +112,8 @@ func (s rawSpoke) next(t *testing.T) message {
 	return message{}
 }
 
-// await receives from ch. Heartbeats keep fake time moving, so a stuck test
-// would never deadlock; it fails after a minute of fake time instead.
+// await receives from ch, or fails after a minute of fake time, so that a stuck
+// test reports which wait never ended.
 func await[T any](t *testing.T, ch <-chan T) T {
 	t.Helper()
 	select {
@@ -272,15 +269,17 @@ func TestHubRegistration(t *testing.T) {
 			hub := NewHub("hub", quiet)
 			conn, peer := net.Pipe()
 			defer conn.Close()
+			served := make(chan error, 1)
 			go func() {
-				if err := hub.Serve(t.Context(), peer, Target{Kind: Control, Node: "hub"}); err == nil || !strings.Contains(err.Error(), "own name") {
-					t.Errorf("registering the hub's name = %v", err)
-				}
+				served <- hub.Serve(t.Context(), peer, Target{Kind: Control, Node: "hub"})
 				peer.Close()
 			}()
 			// Rejected without an acknowledgment.
 			if n, err := conn.Read(make([]byte, 1)); n != 0 || err != io.EOF {
-				t.Errorf("rejected spoke read %d, %v; want the stream closed", n, err)
+				t.Fatalf("rejected spoke read %d, %v; want the stream closed", n, err)
+			}
+			if err := <-served; err == nil || !strings.Contains(err.Error(), "own name") {
+				t.Errorf("registering the hub's name = %v", err)
 			}
 			if _, err := hub.Dial(t.Context(), "hub", "nas", 22); err == nil || !strings.Contains(err.Error(), "not registered") {
 				t.Errorf("Dial to the hub's own name = %v, want not registered", err)
