@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 
 	"github.com/Qusic/miniray/internal/config"
@@ -17,7 +18,7 @@ import (
 
 const usage = `usage:
   miniray prepare <topology.json>   write a <topology>-<node>.json node config beside it for every node
-  miniray run [-debug] <node.json>  run one node config; -debug logs debug messages too
+  miniray run [-debug] <node.json>  run one node config; -debug logs every request too
 `
 
 func main() {
@@ -33,7 +34,7 @@ func main() {
 	case "prepare":
 		err = prepare(parseArg(flags, args))
 	case "run":
-		debug := flags.Bool("debug", false, "log debug messages too")
+		debug := flags.Bool("debug", false, "log every request too")
 		path := parseArg(flags, args) // parses -debug, so before *debug
 		err = run(path, *debug)
 	default:
@@ -76,8 +77,9 @@ func prepare(path string) error {
 	return nil
 }
 
-// run serves one node config. Every log line of the process names the node,
-// and debug adds debug messages to the log.
+// run serves one node config. Every log line of the process names the node.
+// The log follows the state of the node, and debug adds the start and end of
+// every request.
 func run(path string, debug bool) error {
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -87,5 +89,16 @@ func run(path string, debug bool) error {
 		slog.SetLogLoggerLevel(slog.LevelDebug)
 	}
 	slog.SetDefault(slog.Default().With("node", cfg.Name))
+	slog.Info("starting", "version", version())
 	return node.Run(cfg)
+}
+
+// version is the version Go recorded for the build: one that names the
+// commit, such as v0.0.0-20060102150405-abcdef123456, or (devel) if none.
+func version() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "(devel)"
+	}
+	return info.Main.Version
 }

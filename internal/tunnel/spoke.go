@@ -84,15 +84,15 @@ func (s Spoke) session(ctx context.Context) (registered bool, err error) {
 // stream to the hub, or tells the hub why it could not.
 func (s Spoke) open(ctx context.Context, c *control, m message) {
 	log := s.Log.With("alias", m.Alias, "port", m.Port)
+	log.Debug("request started")
+	start := time.Now()
 	target, stream, err := s.connect(ctx, m)
-	if err != nil {
+	if err == nil {
+		err = netutil.Join(stream, target)
+	} else {
 		c.send(failMessage(m.ID, err))
-		log.Warn("request ended", "err", err)
-		return
 	}
-	if err := netutil.Join(stream, target); err != nil {
-		log.Warn("request ended", "err", err)
-	}
+	log.Debug("request ended", "duration", time.Since(start).Round(time.Millisecond), "err", err)
 }
 
 // connect dials the alias the hub asked for, then opens the data stream that

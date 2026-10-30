@@ -68,49 +68,42 @@ func (h trojanHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		if !errors.Is(err, io.EOF) {
-			log.Warn("trojan request rejected", "err", err)
+			log.Debug("trojan request rejected", "err", err)
 		}
 		return
 	}
 	conn.SetReadDeadline(time.Time{})
 
-	if err := h.route(r.Context(), conn, request.Host, request.Port); err != nil {
-		log.Warn("request ended", "err", err)
-	}
+	log = log.With("target", joinHostPort(request.Host, request.Port))
+	log.Debug("request started")
+	start := time.Now()
+	err = h.route(r.Context(), conn, request.Host, request.Port)
+	log.Debug("request ended", "duration", time.Since(start).Round(time.Millisecond), "err", err)
 }
 
 // httpProxyHandler serves an HTTP proxy without authentication. A CONNECT
 // request has its stream joined with the target, and a request for an http URL
 // is passed on to the target's server.
 type httpProxyHandler struct {
-	proxy *httputil.ReverseProxy // passes requests on, dialing with dial
-	dial  dialFunc
-	log   *slog.Logger
+	transport *http.Transport // carries requests to targets' servers with dial
+	dial      dialFunc
+	log       *slog.Logger
 }
 
 // newHTTPProxyHandler returns a proxy that reaches its targets with dial and
 // logs to log.
 func newHTTPProxyHandler(dial dialFunc, log *slog.Logger) httpProxyHandler {
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) {
-			host, port, err := parseHostPort(addr)
-			if err != nil {
-				return nil, err
-			}
-			return dial(ctx, host, port)
-		},
-		// Every request gets a connection of its own, so none lingers idle.
-		DisableKeepAlives: true,
-	}
 	return httpProxyHandler{
-		proxy: &httputil.ReverseProxy{
-			// The request names its target already, so Rewrite changes nothing.
-			Rewrite:   func(*httputil.ProxyRequest) {},
-			Transport: transport,
-			ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-				log.Warn("request ended", "remote", r.RemoteAddr, "err", err)
-				w.WriteHeader(http.StatusBadGateway)
+		transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) {
+				host, port, err := parseHostPort(addr)
+				if err != nil {
+					return nil, err
+				}
+				return dial(ctx, host, port)
 			},
+			// Every request gets a connection of its own, so none lingers idle.
+			DisableKeepAlives: true,
 		},
 		dial: dial,
 		log:  log,
@@ -122,18 +115,23 @@ func (h httpProxyHandler) serve(l net.Listener) error {
 }
 
 func (h httpProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	var serve func(http.ResponseWriter, *http.Request) error
 	switch {
 	case r.Method == http.MethodConnect:
-		if err := h.connect(w, r); err != nil {
-			h.log.Warn("request ended", "remote", r.RemoteAddr, "err", err)
-		}
+		serve = h.connect
 	// Clients send plain http requests in absolute form and use CONNECT for
 	// https, so TLS stays between the client and the target.
 	case r.URL.Scheme == "http" && r.URL.Host != "":
-		h.proxy.ServeHTTP(w, r)
+		serve = h.passOn
 	default:
 		w.WriteHeader(http.StatusBadRequest)
+		return
 	}
+	log := h.log.With("remote", r.RemoteAddr, "target", r.Host)
+	log.Debug("request started")
+	start := time.Now()
+	err := serve(w, r)
+	log.Debug("request ended", "duration", time.Since(start).Round(time.Millisecond), "err", err)
 }
 
 // connect answers a CONNECT request with 200 once dial reaches its target, and
@@ -164,6 +162,24 @@ func (h httpProxyHandler) connect(w http.ResponseWriter, r *http.Request) error 
 	return netutil.Join(conn, target)
 }
 
+// passOn passes a request for an http URL on to the target's server. It
+// answers 502 when the server cannot be reached. The ReverseProxy is made for
+// this one request, so that its ErrorHandler can hand the error back.
+func (h httpProxyHandler) passOn(w http.ResponseWriter, r *http.Request) error {
+	var err error
+	proxy := &httputil.ReverseProxy{
+		// The request names its target already, so Rewrite changes nothing.
+		Rewrite:   func(*httputil.ProxyRequest) {},
+		Transport: h.transport,
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, proxyErr error) {
+			err = proxyErr
+			w.WriteHeader(http.StatusBadGateway)
+		},
+	}
+	proxy.ServeHTTP(w, r)
+	return err
+}
+
 // parseHostPort parses a host:port that a client asks for: an IP literal is an
 // IP, and anything else a domain name.
 func parseHostPort(text string) (netutil.Address, uint16, error) {
@@ -181,6 +197,11 @@ func parseHostPort(text string) (netutil.Address, uint16, error) {
 	}
 	address, err := netutil.DomainAddress(host)
 	return address, uint16(port), err
+}
+
+// joinHostPort writes host and port in the form parseHostPort parses.
+func joinHostPort(host netutil.Address, port uint16) string {
+	return net.JoinHostPort(host.String(), strconv.Itoa(int(port)))
 }
 
 // serveHTTP serves h over HTTP on l, giving each client setupTimeout to send
@@ -222,11 +243,12 @@ func (h tcpHandler) serve(l net.Listener) error {
 
 func (h tcpHandler) handle(conn net.Conn) {
 	defer conn.Close()
+	log := h.log.With("remote", conn.RemoteAddr().String(), "target", joinHostPort(h.host, h.port))
+	log.Debug("request started")
+	start := time.Now()
 	target, err := h.dial(context.Background(), h.host, h.port)
 	if err == nil {
 		err = netutil.Join(conn, target)
 	}
-	if err != nil {
-		h.log.Warn("request ended", "remote", conn.RemoteAddr().String(), "err", err)
-	}
+	log.Debug("request ended", "duration", time.Since(start).Round(time.Millisecond), "err", err)
 }

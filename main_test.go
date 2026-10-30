@@ -81,7 +81,8 @@ func TestPrepareWritesNothingForInvalidTopology(t *testing.T) {
 	}
 }
 
-// run names the node in every log line, and -debug adds debug messages.
+// run logs the version as it starts, names the node in every log line, and
+// with -debug adds debug messages.
 func TestRunLogging(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "desk.json")
 	if err := os.WriteFile(path, []byte(`{"name": "desk"}`), 0o600); err != nil {
@@ -107,6 +108,9 @@ func TestRunLogging(t *testing.T) {
 		slog.Debug("probe debug")
 		slog.Info("probe info")
 		got := out.String()
+		if !strings.Contains(got, "INFO starting node=desk version=") {
+			t.Errorf("run with debug %t: log %q does not give the version", debug, got)
+		}
 		if !strings.Contains(got, "probe info node=desk") {
 			t.Errorf("run with debug %t: log %q does not name the node", debug, got)
 		}

@@ -28,7 +28,7 @@ func dialDirect(ctx context.Context, host netutil.Address, port uint16) (net.Con
 		return nil, fmt.Errorf("%s: .tunnel names are not dialed directly", host)
 	}
 	dialer := net.Dialer{Timeout: setupTimeout}
-	return dialer.DialContext(ctx, "tcp", net.JoinHostPort(host.String(), strconv.Itoa(int(port))))
+	return dialer.DialContext(ctx, "tcp", joinHostPort(host, port))
 }
 
 // trojanClient is the client side of trojanHandler: it speaks Trojan over
@@ -49,7 +49,9 @@ func newTrojanClient(u url.URL, via dialFunc) trojanClient {
 }
 
 // dial reaches host:port through the remote handler: via opens the connection
-// to the handler, and connect builds the stream on top.
+// to the handler, and connect builds the stream on top. Its errors name the
+// handler, so that one from dialing through other clients names every handler
+// on the way, ending with the one that failed.
 func (c trojanClient) dial(ctx context.Context, host netutil.Address, port uint16) (net.Conn, error) {
 	ctx, cancel := context.WithTimeout(ctx, setupTimeout)
 	defer cancel()
@@ -59,9 +61,13 @@ func (c trojanClient) dial(ctx context.Context, host netutil.Address, port uint1
 	}
 	base, err := c.via(ctx, serverHost, serverPort)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: %w", c.url.Host, err)
 	}
-	return c.connect(ctx, base, host, port)
+	conn, err := c.connect(ctx, base, host, port)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", c.url.Host, err)
+	}
+	return conn, nil
 }
 
 // connect asks the remote handler, reached over base, to connect a new stream

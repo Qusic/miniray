@@ -84,10 +84,13 @@ func (h *Hub) Serve(ctx context.Context, conn net.Conn, t Target) error {
 
 // register keeps spoke registered for as long as its control stream lasts.
 // It acknowledges the registration with a ready message; a rejected spoke
-// gets none before its stream closes.
+// gets none before its stream closes. It logs each registration it accepts,
+// turns away, or ends, as its caller logs streams only with debug.
 func (h *Hub) register(ctx context.Context, conn net.Conn, spoke netutil.Label) error {
 	if spoke == h.self {
-		return fmt.Errorf("tunnel: %s is the hub's own name", spoke)
+		err := fmt.Errorf("tunnel: %s is the hub's own name", spoke)
+		h.log.Warn("registration rejected", "spoke", spoke, "err", err)
+		return err
 	}
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
@@ -107,16 +110,19 @@ func (h *Hub) register(ctx context.Context, conn net.Conn, spoke netutil.Label) 
 	if old != nil {
 		old.cancel(errReplaced)
 	}
-	h.log.Info("spoke registered", "spoke", spoke, "replaced", old != nil)
+	h.log.Info("spoke registered", "spoke", spoke)
 
-	if err := s.control.send(message{Type: typeReady}); err != nil {
-		return fmt.Errorf("spoke %s: %w", spoke, err)
+	err := s.control.send(message{Type: typeReady})
+	if err == nil {
+		err = s.control.run(ctx, func(m message) {
+			if m.Type == typeFail {
+				h.settle(spoke, m.ID, dialResult{
+					err: fmt.Errorf("tunnel: spoke %s: %s", spoke, m.Error),
+				})
+			}
+		})
 	}
-	err := s.control.run(ctx, func(m message) {
-		if m.Type == typeFail {
-			h.settle(spoke, m.ID, dialResult{err: fmt.Errorf("tunnel: spoke %s: %s", spoke, m.Error)})
-		}
-	})
+	h.log.Warn("spoke disconnected", "spoke", spoke, "err", err)
 	return fmt.Errorf("spoke %s: %w", spoke, err)
 }
 

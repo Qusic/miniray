@@ -6,11 +6,11 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
-	"strconv"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -184,7 +184,7 @@ func TestHTTPProxyHandler(t *testing.T) {
 			if host.IP().IsValid() {
 				kind = "ip"
 			}
-			dialed = append(dialed, kind+" "+net.JoinHostPort(host.String(), strconv.Itoa(int(port))))
+			dialed = append(dialed, kind+" "+joinHostPort(host, port))
 			switch host.String() {
 			case "ssh.example.com":
 				var conn net.Conn
@@ -337,7 +337,7 @@ func TestTCPHandler(t *testing.T) {
 			host: domainAddress(t, "ssh.example.com"),
 			port: 22,
 			dial: func(_ context.Context, host netutil.Address, port uint16) (net.Conn, error) {
-				dialed = append(dialed, net.JoinHostPort(host.String(), strconv.Itoa(int(port))))
+				dialed = append(dialed, joinHostPort(host, port))
 				if unreachable {
 					return nil, errors.New("unreachable")
 				}
@@ -414,4 +414,81 @@ func TestTCPHandlerWaitsForResponse(t *testing.T) {
 		write(t, server, []byte("response"))
 		read(t, client, "response")
 	})
+}
+
+// Handlers log the start and end of each request at debug level, so that only
+// debug logs every request. The lines name the client and the target, and the
+// last says how long the request took and why it ended.
+func TestHandlerLogs(t *testing.T) {
+	refused := errors.New("refused")
+	// A refusal takes a second, for the request to take as long.
+	refuse := func(context.Context, netutil.Address, uint16) (net.Conn, error) {
+		time.Sleep(time.Second)
+		return nil, refused
+	}
+	// trojan serves one request for ssh.example.com:22 from a client with
+	// password, and refuses it in route.
+	trojan := func(password string) func(*testing.T, *slog.Logger) {
+		return func(t *testing.T, log *slog.Logger) {
+			handler := trojanHandler{
+				path:   "/",
+				trojan: protocol.NewTrojan("secret"),
+				log:    log,
+				route: func(ctx context.Context, _ net.Conn, host netutil.Address, port uint16) error {
+					_, err := refuse(ctx, host, port)
+					return err
+				},
+			}
+			finished := make(chan struct{})
+			srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer close(finished)
+				handler.ServeHTTP(w, r)
+			}))
+			conn := dialServer(t, srv)
+			client := protocol.NewTrojan(password)
+			request(t, conn, client, protocol.TrojanConnect, "ssh.example.com", 22)
+			<-finished
+		}
+	}
+	refusedLog := `level=DEBUG msg="request started" remote=* target=ssh.example.com:22
+level=DEBUG msg="request ended" remote=* target=ssh.example.com:22 duration=1s err=refused
+`
+	for _, tt := range []struct {
+		name  string
+		serve func(*testing.T, *slog.Logger) // serves one request, logging to the logger
+		want  string
+	}{
+		{"trojan", trojan("secret"), refusedLog},
+		{"trojan with the wrong password", trojan("other"),
+			`level=DEBUG msg="trojan request rejected" remote=* err="trojan: wrong password"` + "\n"},
+		{"HTTP proxy CONNECT", func(t *testing.T, log *slog.Logger) {
+			r := httptest.NewRequest(http.MethodConnect, "ssh.example.com:22", nil)
+			newHTTPProxyHandler(refuse, log).ServeHTTP(httptest.NewRecorder(), r)
+		}, refusedLog},
+		{"HTTP proxy for an http URL", func(t *testing.T, log *slog.Logger) {
+			r := httptest.NewRequest(http.MethodGet, "http://ssh.example.com:22/", nil)
+			newHTTPProxyHandler(refuse, log).ServeHTTP(httptest.NewRecorder(), r)
+		}, refusedLog},
+		{"TCP", func(t *testing.T, log *slog.Logger) {
+			conn, peer := net.Pipe()
+			defer peer.Close()
+			handler := tcpHandler{
+				host: domainAddress(t, "ssh.example.com"),
+				port: 22,
+				dial: refuse,
+				log:  log,
+			}
+			handler.handle(conn)
+		}, refusedLog},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				var logs bytes.Buffer
+				tt.serve(t, textLog(&logs))
+				if got := logs.String(); got != tt.want {
+					t.Errorf("log:\n%s\nwant:\n%s", got, tt.want)
+				}
+			})
+		})
+	}
 }

@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -148,4 +149,38 @@ func TestSpokeKeepsOpenConnections(t *testing.T) {
 		}
 		exchange(t, conn, "still open")
 	})
+}
+
+// A spoke logs its registration at a level shown without debug, and each
+// connection it opens for the hub only at debug level.
+func TestSpokeLogs(t *testing.T) {
+	var logs bytes.Buffer
+	synctest.Test(t, func(t *testing.T) {
+		hub := NewHub("hub", quiet)
+		spoke, _ := spokeServing(t, hub, "lab")
+		spoke.Log = textLog(&logs)
+		ctx, cancel := context.WithCancel(t.Context())
+		stopped := make(chan error)
+		go func() { stopped <- spoke.Run(ctx) }()
+		synctest.Wait()
+		conn, err := hub.Dial(t.Context(), "lab", "nas", 22)
+		if err != nil {
+			t.Fatal(err)
+		}
+		exchange(t, conn, "hello")
+		time.Sleep(time.Second)
+		conn.Close()
+		cancel()
+		<-stopped
+	})
+	// Read the log only now that the bubble has ended: the spoke logs the end
+	// of a connection just before that goroutine exits, and only the end of the
+	// bubble orders such an exit before this goroutine goes on.
+	want := `level=INFO msg="registered with the hub"
+level=DEBUG msg="request started" alias=nas port=22
+level=DEBUG msg="request ended" alias=nas port=22 duration=1s err=<nil>
+`
+	if got := logs.String(); got != want {
+		t.Errorf("log:\n%s\nwant:\n%s", got, want)
+	}
 }

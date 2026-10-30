@@ -3,9 +3,9 @@ package node
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -121,20 +121,7 @@ func TestTrojanClient(t *testing.T) {
 	t.Run("through relay", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			hubSrv, targets := echoServer(t, protocol.NewTrojan("tunnel-secret"))
-			relayed := make(chan string, 1)
-			relaySrv := httptest.NewTestServer(t, trojanHandler{
-				path:   "/",
-				trojan: protocol.NewTrojan("relay-secret"),
-				log:    quiet,
-				route: func(ctx context.Context, conn net.Conn, host netutil.Address, port uint16) error {
-					relayed <- net.JoinHostPort(host.String(), strconv.Itoa(int(port)))
-					target, err := memoryDial(hubSrv)(ctx, host, port)
-					if err != nil {
-						return err
-					}
-					return netutil.Join(conn, target)
-				},
-			})
+			relaySrv, relayed := relayServer(t, hubSrv)
 			relay := newTrojanClient(mustURL(t, "ws://:relay-secret@relay.example.com/"), memoryDial(relaySrv))
 			c := newTrojanClient(mustURL(t, "ws://:tunnel-secret@hub.example.com/"), relay.dial)
 			conn, err := c.dial(t.Context(), domainAddress(t, "ssh.example.com"), 22)
@@ -152,6 +139,50 @@ func TestTrojanClient(t *testing.T) {
 			read(t, conn, "hello")
 		})
 	})
+	// An error through a relay names the handlers on the way, ending with the
+	// one that failed.
+	t.Run("error through relay", func(t *testing.T) {
+		for _, tt := range []struct{ relayPath, hubPath, names string }{
+			{"/other", "/", "hub.example.com: relay.example.com: "},
+			{"/", "/other", "hub.example.com: "},
+		} {
+			synctest.Test(t, func(t *testing.T) {
+				hubSrv, _ := echoServer(t, protocol.NewTrojan("tunnel-secret"))
+				relaySrv, _ := relayServer(t, hubSrv)
+				relayURL := "ws://:relay-secret@relay.example.com" + tt.relayPath
+				relay := newTrojanClient(mustURL(t, relayURL), memoryDial(relaySrv))
+				hubURL := "ws://:tunnel-secret@hub.example.com" + tt.hubPath
+				c := newTrojanClient(mustURL(t, hubURL), relay.dial)
+				_, err := c.dial(t.Context(), domainAddress(t, "ssh.example.com"), 22)
+				// The handlers named, and after them no other.
+				rest, named := strings.CutPrefix(fmt.Sprint(err), tt.names)
+				if err == nil || !named || strings.Contains(rest, ".example.com: ") {
+					t.Errorf("relay at %s, hub at %s: dial = %v, want an error naming %q",
+						tt.relayPath, tt.hubPath, err, tt.names)
+				}
+			})
+		}
+	})
+}
+
+// relayServer serves a relay's Trojan handler, which reports each host:port it
+// is asked for and reaches it on hubSrv's network.
+func relayServer(t *testing.T, hubSrv *httptest.Server) (*httptest.Server, <-chan string) {
+	relayed := make(chan string, 1)
+	srv := httptest.NewTestServer(t, trojanHandler{
+		path:   "/",
+		trojan: protocol.NewTrojan("relay-secret"),
+		log:    quiet,
+		route: func(ctx context.Context, conn net.Conn, host netutil.Address, port uint16) error {
+			relayed <- joinHostPort(host, port)
+			target, err := memoryDial(hubSrv)(ctx, host, port)
+			if err != nil {
+				return err
+			}
+			return netutil.Join(conn, target)
+		},
+	})
+	return srv, relayed
 }
 
 // A client reaches its remote handler where the URL says, on the scheme's
@@ -174,7 +205,7 @@ func TestTrojanClientAddress(t *testing.T) {
 		reached := errors.New("reached the remote handler")
 		got := ""
 		c := newTrojanClient(mustURL(t, tt.url), func(_ context.Context, host netutil.Address, port uint16) (net.Conn, error) {
-			got = net.JoinHostPort(host.String(), strconv.Itoa(int(port)))
+			got = joinHostPort(host, port)
 			return nil, reached
 		})
 		_, err := c.dial(t.Context(), domainAddress(t, "ssh.example.com"), 22)

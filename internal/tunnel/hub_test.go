@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -17,6 +18,20 @@ import (
 
 // quiet discards the logs of hubs and spokes under test.
 var quiet = slog.New(slog.DiscardHandler)
+
+// textLog returns a logger that writes every line to w, debug included, as
+// text without the time.
+func textLog(w io.Writer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return a
+		},
+	}))
+}
 
 // served wires streams to hub the way Serve expects its caller to: each stream
 // opened for a request is served by Hub.Serve and closed once Serve returns.
@@ -304,6 +319,29 @@ func TestHubRegistration(t *testing.T) {
 				}
 			}
 		})
+	})
+}
+
+// The hub logs each registration it accepts, turns away, or ends, at a level
+// shown without debug and with the reason for turning it away or ending it.
+func TestHubLogs(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var logs bytes.Buffer
+		hub := NewHub("hub", textLog(&logs))
+		s := register(t, hub, "lab")
+		s.control.conn.Close()
+		await(t, s.served)
+		conn, peer := net.Pipe()
+		defer conn.Close()
+		hub.Serve(t.Context(), peer, Target{Kind: Control, Node: "hub"})
+		peer.Close()
+		want := `level=INFO msg="spoke registered" spoke=lab
+level=WARN msg="spoke disconnected" spoke=lab err=EOF
+level=WARN msg="registration rejected" spoke=hub err="tunnel: hub is the hub's own name"
+`
+		if got := logs.String(); got != want {
+			t.Errorf("log:\n%s\nwant:\n%s", got, want)
+		}
 	})
 }
 

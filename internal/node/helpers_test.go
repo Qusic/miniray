@@ -11,7 +11,6 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
-	"strconv"
 	"testing"
 
 	"github.com/Qusic/miniray/internal/netutil"
@@ -20,6 +19,24 @@ import (
 
 // quiet discards the logs of handlers, hubs, and spokes under test.
 var quiet = slog.New(slog.DiscardHandler)
+
+// textLog returns a logger that writes every line to w, debug included, as
+// text without the time and with * for the remote address, since both differ
+// between runs.
+func textLog(w io.Writer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+			switch a.Key {
+			case slog.TimeKey:
+				return slog.Attr{}
+			case "remote":
+				return slog.String(a.Key, "*")
+			}
+			return a
+		},
+	}))
+}
 
 // echo returns a connection to a target that echoes its stream back.
 func echo() net.Conn {
@@ -56,7 +73,7 @@ func echoServer(t *testing.T, trojan protocol.Trojan) (*httptest.Server, <-chan 
 		trojan: trojan,
 		log:    quiet,
 		route: func(_ context.Context, conn net.Conn, host netutil.Address, port uint16) error {
-			targets <- net.JoinHostPort(host.String(), strconv.Itoa(int(port)))
+			targets <- joinHostPort(host, port)
 			return netutil.Join(conn, echo())
 		},
 	})
@@ -67,7 +84,7 @@ func echoServer(t *testing.T, trojan protocol.Trojan) (*httptest.Server, <-chan 
 func memoryDial(srv *httptest.Server) dialFunc {
 	dial := srv.Client().Transport.(*http.Transport).DialContext
 	return func(ctx context.Context, host netutil.Address, port uint16) (net.Conn, error) {
-		return dial(ctx, "tcp", net.JoinHostPort(host.String(), strconv.Itoa(int(port))))
+		return dial(ctx, "tcp", joinHostPort(host, port))
 	}
 }
 

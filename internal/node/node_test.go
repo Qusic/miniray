@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -179,7 +178,7 @@ func TestAssembleHTTPProxies(t *testing.T) {
 		log:    quiet,
 		// The relay echoes what it gets, then hangs up.
 		route: func(_ context.Context, conn net.Conn, host netutil.Address, port uint16) error {
-			relayed <- net.JoinHostPort(host.String(), strconv.Itoa(int(port)))
+			relayed <- joinHostPort(host, port)
 			_, err := io.Copy(conn, io.LimitReader(conn, int64(len("hello"))))
 			return err
 		},
@@ -242,7 +241,7 @@ func TestAssembleForwardAndLink(t *testing.T) {
 		trojan: protocol.NewTrojan("tunnel-secret"),
 		log:    quiet,
 		route: func(_ context.Context, conn net.Conn, host netutil.Address, port uint16) error {
-			targets <- net.JoinHostPort(host.String(), strconv.Itoa(int(port)))
+			targets <- joinHostPort(host, port)
 			return netutil.Join(conn, echo())
 		},
 	})
@@ -313,7 +312,7 @@ func TestAssembleSpoke(t *testing.T) {
 		trojan: protocol.NewTrojan("tunnel-secret"),
 		log:    quiet,
 		route: func(_ context.Context, conn net.Conn, host netutil.Address, port uint16) error {
-			targets <- net.JoinHostPort(host.String(), strconv.Itoa(int(port)))
+			targets <- joinHostPort(host, port)
 			return netutil.Join(conn, echo())
 		},
 	}))
@@ -324,7 +323,7 @@ func TestAssembleSpoke(t *testing.T) {
 		trojan: protocol.NewTrojan("relay-secret"),
 		log:    quiet,
 		route: func(ctx context.Context, conn net.Conn, host netutil.Address, port uint16) error {
-			relayed <- net.JoinHostPort(host.String(), strconv.Itoa(int(port)))
+			relayed <- joinHostPort(host, port)
 			target, err := dialDirect(ctx, host, port)
 			if err != nil {
 				return err
