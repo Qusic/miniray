@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -140,6 +141,45 @@ func TestControlSendFitsMessages(t *testing.T) {
 		go c.send(m)
 		if got, err := p.receive(); err != nil || got != m {
 			t.Errorf("trimmed fail message arrived as %+v, %v", got, err)
+		}
+	})
+}
+
+// byteConn writes a byte at a time, yielding after each, so that writes from
+// different goroutines interleave unless something serializes them. It does
+// not sleep instead, since fake time stops while a goroutine waits for a mutex.
+type byteConn struct{ net.Conn }
+
+func (c byteConn) Write(p []byte) (int, error) {
+	for i := range p {
+		if _, err := c.Conn.Write(p[i : i+1]); err != nil {
+			return i, err
+		}
+		runtime.Gosched()
+	}
+	return len(p), nil
+}
+
+// Sends from different goroutines arrive whole, even on a connection that
+// lets concurrent writes interleave.
+func TestControlSendsArriveWhole(t *testing.T) {
+	bubble(t, func(t *testing.T) {
+		conn, peer := net.Pipe()
+		defer peer.Close()
+		c, p := newControl(byteConn{conn}), newControl(peer)
+		const n = 3
+		sent := make(map[message]bool)
+		for id := range uint16(n) {
+			m := message{Type: typeOpen, ID: id + 1, Alias: "nas", Port: 22}
+			sent[m] = true
+			go c.send(m)
+		}
+		for range n {
+			m, err := p.receive()
+			if err != nil || !sent[m] {
+				t.Fatalf("received %+v, %v; want each message sent, once", m, err)
+			}
+			delete(sent, m)
 		}
 	})
 }
