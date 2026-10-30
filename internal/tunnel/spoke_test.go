@@ -20,7 +20,7 @@ import (
 // starts over once the hub has acknowledged a registration with a ready
 // message. Run ends with the cause of its context.
 func TestSpokeReconnects(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	bubble(t, func(t *testing.T) {
 		start := time.Now()
 		var attempts []time.Duration
 		ctx, cancel := context.WithCancelCause(t.Context())
@@ -88,7 +88,7 @@ func (c *halfConn) Close() error                { return errors.Join(c.Conn.Clos
 // finished, the stream, which cannot half-close, ends within a moment, rather
 // than after the long wait that Join gives a target's response.
 func TestSpokeEndsStreamSoonAfterAlias(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	bubble(t, func(t *testing.T) {
 		hub := NewHub("hub", quiet)
 		spoke, _ := spokeServing(t, hub, "lab")
 		alias, server := halfPair()
@@ -128,7 +128,7 @@ func TestSpokeEndsStreamSoonAfterAlias(t *testing.T) {
 // Connections already open outlive the control stream, while the hub stops
 // routing to the spoke at once.
 func TestSpokeKeepsOpenConnections(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	bubble(t, func(t *testing.T) {
 		hub := NewHub("hub", quiet)
 		spoke, _ := spokeServing(t, hub, "lab")
 		ctx, cancel := context.WithCancel(t.Context())
@@ -155,7 +155,7 @@ func TestSpokeKeepsOpenConnections(t *testing.T) {
 // connection it opens for the hub only at debug level.
 func TestSpokeLogs(t *testing.T) {
 	var logs bytes.Buffer
-	synctest.Test(t, func(t *testing.T) {
+	bubble(t, func(t *testing.T) {
 		hub := NewHub("hub", quiet)
 		spoke, _ := spokeServing(t, hub, "lab")
 		spoke.Log = textLog(&logs)

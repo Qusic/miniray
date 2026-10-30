@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime/debug"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -18,6 +19,21 @@ import (
 	"github.com/Qusic/miniray/internal/netutil"
 	"github.com/coder/websocket"
 )
+
+// bubble runs f in a synctest bubble, and panics if f is still running after
+// a day of fake time, far longer than any test here takes. Heartbeats keep
+// waking the bubble, so synctest never finds a stuck test deadlocked, and it
+// would run on until the test binary times out.
+func bubble(t *testing.T, f func(*testing.T)) {
+	synctest.Test(t, func(t *testing.T) {
+		stuck := time.AfterFunc(24*time.Hour, func() {
+			debug.SetTraceback("all") // to show where the test is stuck
+			panic(t.Name() + " still running after a day of fake time")
+		})
+		t.Cleanup(func() { stuck.Stop() }) // after f's cleanups, which may get stuck too
+		f(t)
+	})
+}
 
 // dial opens a WebSocket stream to srv over a connection from its in-memory
 // network. ctx bounds only the handshake.
@@ -116,7 +132,7 @@ func pendingRead(conn net.Conn) <-chan readResult {
 }
 
 func TestWebSocketStream(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	bubble(t, func(t *testing.T) {
 		start := time.Now()
 		srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			conn, err := AcceptWebSocket(w, r)
@@ -172,7 +188,7 @@ func TestWebSocketDroppedPeer(t *testing.T) {
 		{"inside a frame", []byte{0x82, 0x80 | 10, 1, 2, 3, 4, 'a', 'b', 'c'}, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
+			bubble(t, func(t *testing.T) {
 				read := make(chan error, 1)
 				srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					conn, err := AcceptWebSocket(w, r)
@@ -204,42 +220,46 @@ func TestWebSocketDroppedPeer(t *testing.T) {
 
 // ClientWebSocket takes over its connection, so a failed handshake closes it.
 func TestClientWebSocketClosesOnFailure(t *testing.T) {
-	conn, peer := net.Pipe()
-	defer peer.Close()
-	go func() {
-		// Answer the upgrade request with a plain response.
-		buf := make([]byte, 4096)
-		peer.Read(buf)
-		io.WriteString(peer, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-	}()
-	if ws, err := ClientWebSocket(t.Context(), conn, "ws://example.com/"); err == nil {
-		ws.Close()
-		t.Fatal("handshake succeeded without an upgrade")
-	}
-	if _, err := conn.Write([]byte("x")); !errors.Is(err, io.ErrClosedPipe) {
-		t.Errorf("write after a failed handshake = %v, want the connection closed", err)
-	}
+	bubble(t, func(t *testing.T) {
+		conn, peer := net.Pipe()
+		defer peer.Close()
+		go func() {
+			// Answer the upgrade request with a plain response.
+			buf := make([]byte, 4096)
+			peer.Read(buf)
+			io.WriteString(peer, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+		}()
+		if ws, err := ClientWebSocket(t.Context(), conn, "ws://example.com/"); err == nil {
+			ws.Close()
+			t.Fatal("handshake succeeded without an upgrade")
+		}
+		if _, err := conn.Write([]byte("x")); !errors.Is(err, io.ErrClosedPipe) {
+			t.Errorf("write after a failed handshake = %v, want the connection closed", err)
+		}
+	})
 }
 
 // ClientWebSocket's connection leads to one host, so a redirect fails the
 // handshake without a second request.
 func TestClientWebSocketRefusesRedirect(t *testing.T) {
-	var requests atomic.Int32
-	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests.Add(1)
-		http.Redirect(w, r, "/elsewhere", http.StatusFound)
-	}))
-	if ws, err := dial(t, t.Context(), srv); err == nil {
-		ws.Close()
-		t.Fatal("handshake followed a redirect into a stream")
-	}
-	if n := requests.Load(); n != 1 {
-		t.Errorf("server got %d requests, want 1", n)
-	}
+	bubble(t, func(t *testing.T) {
+		var requests atomic.Int32
+		srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests.Add(1)
+			http.Redirect(w, r, "/elsewhere", http.StatusFound)
+		}))
+		if ws, err := dial(t, t.Context(), srv); err == nil {
+			ws.Close()
+			t.Fatal("handshake followed a redirect into a stream")
+		}
+		if n := requests.Load(); n != 1 {
+			t.Errorf("server got %d requests, want 1", n)
+		}
+	})
 }
 
 func TestWebSocketAcceptLifetime(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	bubble(t, func(t *testing.T) {
 		accepted := make(chan net.Conn, 1)
 		srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			conn, err := AcceptWebSocket(w, r)
@@ -264,7 +284,7 @@ func TestWebSocketAcceptLifetime(t *testing.T) {
 }
 
 func TestWebSocketRejectsText(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	bubble(t, func(t *testing.T) {
 		done := make(chan error, 1)
 		srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			conn, err := AcceptWebSocket(w, r)
@@ -294,7 +314,7 @@ func TestWebSocketRejectsText(t *testing.T) {
 }
 
 func TestWebSocketCopyErrorClosesBothAndWaitsForPeerTimeout(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	bubble(t, func(t *testing.T) {
 		b, target := net.Pipe()
 		defer target.Close()
 		done := make(chan error, 1)
@@ -390,7 +410,7 @@ func readString(t *testing.T, r io.Reader, want string) {
 // after Join has closed its idle stream, still gets the whole response, then
 // EOF.
 func TestWebSocketCloseFollowsResponse(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	bubble(t, func(t *testing.T) {
 		srv, targetDone, joined := joinedServer(t, "response")
 		conn, err := dial(t, t.Context(), srv)
 		if err != nil {
@@ -410,7 +430,7 @@ func TestWebSocketCloseFollowsResponse(t *testing.T) {
 }
 
 func TestWebSocketConcurrentClose(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	bubble(t, func(t *testing.T) {
 		done := make(chan error, 1)
 		srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			conn, err := AcceptWebSocket(w, r)
@@ -455,7 +475,7 @@ func TestWebSocketConcurrentClose(t *testing.T) {
 func TestWebSocketHeartbeat(t *testing.T) {
 	for _, side := range sides {
 		t.Run(side.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
+			bubble(t, func(t *testing.T) {
 				_, peer := side.open(t, subprotocol)
 				start := time.Now()
 				// Stop short of the heartbeat due at the very end.
@@ -487,7 +507,7 @@ func TestWebSocketHeartbeat(t *testing.T) {
 // reads nothing, waits its turn rather than breaking the stream, and the
 // heartbeats go on once the peer reads again.
 func TestWebSocketHeartbeatWaitsBehindWrites(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	bubble(t, func(t *testing.T) {
 		srv, accepted := acceptServer(t)
 		var base net.Conn
 		client := &http.Client{Transport: &http.Transport{
@@ -545,7 +565,7 @@ func TestWebSocketHeartbeatWaitsBehindWrites(t *testing.T) {
 // Heartbeats keep an idle stream between miniray nodes open while both ends
 // wait to read.
 func TestWebSocketIdleStream(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	bubble(t, func(t *testing.T) {
 		srv, accepted := acceptServer(t)
 		client, err := dial(t, t.Context(), srv)
 		if err != nil {
@@ -572,7 +592,7 @@ func TestWebSocketIdleStream(t *testing.T) {
 func TestWebSocketSilence(t *testing.T) {
 	for _, side := range sides {
 		t.Run(side.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
+			bubble(t, func(t *testing.T) {
 				conn, peer := side.open(t, subprotocol)
 				send := func(data string) {
 					t.Helper()
@@ -617,7 +637,7 @@ func TestWebSocketSilence(t *testing.T) {
 func TestWebSocketWithoutSubprotocol(t *testing.T) {
 	for _, side := range sides {
 		t.Run(side.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
+			bubble(t, func(t *testing.T) {
 				conn, peer := side.open(t)
 				read := pendingRead(conn)
 				got := make(chan []byte, 1)

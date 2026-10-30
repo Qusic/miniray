@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -15,6 +16,21 @@ import (
 
 	"github.com/Qusic/miniray/internal/netutil"
 )
+
+// bubble runs f in a synctest bubble, and panics if f is still running after
+// an hour of fake time, far longer than any test here takes. A spoke retrying
+// its registration keeps waking the bubble, so synctest never finds a stuck
+// test deadlocked, and it would run on until the test binary times out.
+func bubble(t *testing.T, f func(*testing.T)) {
+	synctest.Test(t, func(t *testing.T) {
+		stuck := time.AfterFunc(time.Hour, func() {
+			debug.SetTraceback("all") // to show where the test is stuck
+			panic(t.Name() + " still running after an hour of fake time")
+		})
+		t.Cleanup(func() { stuck.Stop() }) // after f's cleanups, which may get stuck too
+		f(t)
+	})
+}
 
 // quiet discards the logs of hubs and spokes under test.
 var quiet = slog.New(slog.DiscardHandler)
@@ -153,7 +169,7 @@ func exchange(t *testing.T, conn net.Conn, text string) {
 }
 
 func TestHubRoutesThroughSpoke(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	bubble(t, func(t *testing.T) {
 		hub := NewHub("hub", quiet)
 		spoke, dialed := spokeServing(t, hub, "lab")
 		ctx, cancel := context.WithCancel(t.Context())
@@ -252,7 +268,7 @@ func TestHubDialFails(t *testing.T) {
 		}, 3 * time.Second, context.DeadlineExceeded.Error(), 3 * time.Second},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
+			bubble(t, func(t *testing.T) {
 				hub := NewHub("hub", quiet)
 				ctx, cancel := context.WithCancel(t.Context())
 				defer cancel()
@@ -280,7 +296,7 @@ func TestHubDialFails(t *testing.T) {
 
 func TestHubRegistration(t *testing.T) {
 	t.Run("own name", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		bubble(t, func(t *testing.T) {
 			hub := NewHub("hub", quiet)
 			conn, peer := net.Pipe()
 			defer conn.Close()
@@ -304,7 +320,7 @@ func TestHubRegistration(t *testing.T) {
 	// A new registration replaces the old one, and the old one ending does not
 	// remove its replacement.
 	t.Run("replacement", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		bubble(t, func(t *testing.T) {
 			hub := NewHub("hub", quiet)
 			old := register(t, hub, "lab")
 			current := register(t, hub, "lab")
@@ -325,7 +341,7 @@ func TestHubRegistration(t *testing.T) {
 // The hub logs each registration it accepts, turns away, or ends, at a level
 // shown without debug and with the reason for turning it away or ending it.
 func TestHubLogs(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	bubble(t, func(t *testing.T) {
 		var logs bytes.Buffer
 		hub := NewHub("hub", textLog(&logs))
 		s := register(t, hub, "lab")
@@ -346,7 +362,7 @@ level=WARN msg="registration rejected" spoke=hub err="tunnel: hub is the hub's o
 }
 
 func TestHubDataStreams(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	bubble(t, func(t *testing.T) {
 		hub := NewHub("hub", quiet)
 		spoke := register(t, hub, "lab")
 		defer spoke.control.conn.Close()
@@ -416,7 +432,7 @@ func TestHubDataStreams(t *testing.T) {
 // A data stream that its Dial stops waiting for before taking it is turned
 // away, rather than held for a taker that never comes.
 func TestHubTurnsAwayUntakenStreams(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	bubble(t, func(t *testing.T) {
 		hub := NewHub("hub", quiet)
 		gone := make(chan struct{})
 		hub.pending[1] = &pending{spoke: "lab", result: make(chan dialResult), gone: gone}

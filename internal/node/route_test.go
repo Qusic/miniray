@@ -54,7 +54,7 @@ func TestRouteTunnelChecksTargets(t *testing.T) {
 // Through the hub's tunnel ingress, spokes register and deliver connections,
 // and clients reach the spokes' aliases.
 func TestRouteTunnelReachesSpokes(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	bubble(t, func(t *testing.T) {
 		p := protocol.NewTrojan("secret")
 		hub := tunnel.NewHub("hub", quiet)
 		srv := httptest.NewTestServer(t, trojanHandler{
@@ -122,9 +122,9 @@ func TestRoutesEndSoonAfterTarget(t *testing.T) {
 			conn, client := net.Pipe()
 			defer client.Close()
 			go route(t.Context(), conn, host, port)
+			client.SetReadDeadline(time.Now().Add(10 * time.Second))
 			read(t, client, "response")
 			start := time.Now()
-			client.SetReadDeadline(start.Add(10 * time.Second))
 			if n, err := client.Read(make([]byte, 1)); n != 0 || err != io.EOF {
 				t.Fatalf("client read %d, %v after the response; want EOF", n, err)
 			}

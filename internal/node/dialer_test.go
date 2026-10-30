@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"testing/synctest"
 	"time"
 
 	"github.com/Qusic/miniray/internal/netutil"
@@ -88,7 +87,7 @@ func TestDialDirectConnects(t *testing.T) {
 // another client.
 func TestTrojanClient(t *testing.T) {
 	t.Run("direct", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		bubble(t, func(t *testing.T) {
 			srv, targets := echoServer(t, protocol.NewTrojan("secret"))
 			c := newTrojanClient(mustURL(t, "ws://:secret@example.com/"), memoryDial(srv))
 			conn, err := c.dial(t.Context(), domainAddress(t, "ssh.example.com"), 22)
@@ -105,7 +104,7 @@ func TestTrojanClient(t *testing.T) {
 	})
 	// A handler at another path refuses the WebSocket handshake.
 	t.Run("wrong path", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		bubble(t, func(t *testing.T) {
 			srv, targets := echoServer(t, protocol.NewTrojan("secret"))
 			c := newTrojanClient(mustURL(t, "ws://:secret@example.com/other"), memoryDial(srv))
 			if conn, err := c.dial(t.Context(), domainAddress(t, "ssh.example.com"), 22); conn != nil || err == nil {
@@ -119,7 +118,7 @@ func TestTrojanClient(t *testing.T) {
 		})
 	})
 	t.Run("through relay", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		bubble(t, func(t *testing.T) {
 			hubSrv, targets := echoServer(t, protocol.NewTrojan("tunnel-secret"))
 			relaySrv, relayed := relayServer(t, hubSrv)
 			relay := newTrojanClient(mustURL(t, "ws://:relay-secret@relay.example.com/"), memoryDial(relaySrv))
@@ -146,7 +145,7 @@ func TestTrojanClient(t *testing.T) {
 			{"/other", "/", "hub.example.com: relay.example.com: "},
 			{"/", "/other", "hub.example.com: "},
 		} {
-			synctest.Test(t, func(t *testing.T) {
+			bubble(t, func(t *testing.T) {
 				hubSrv, _ := echoServer(t, protocol.NewTrojan("tunnel-secret"))
 				relaySrv, _ := relayServer(t, hubSrv)
 				relayURL := "ws://:relay-secret@relay.example.com" + tt.relayPath

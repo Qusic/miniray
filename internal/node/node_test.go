@@ -131,6 +131,7 @@ func TestAssembleIngresses(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	select {
 	case peer := <-accepted:
 		write(t, peer, []byte("hello"))
@@ -156,6 +157,7 @@ func TestAssembleIngresses(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	select {
 	case peer := <-accepted:
 		write(t, peer, []byte("hello"))
@@ -353,6 +355,7 @@ func TestAssembleSpoke(t *testing.T) {
 		if err != nil {
 			t.Fatalf("relay %t: %v", viaRelay, err)
 		}
+		conn.SetDeadline(time.Now().Add(5 * time.Second))
 		write(t, conn, []byte("hello"))
 		read(t, conn, "hello")
 		conn.Close()

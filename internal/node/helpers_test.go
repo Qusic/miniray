@@ -11,11 +11,30 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"runtime/debug"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/Qusic/miniray/internal/netutil"
 	"github.com/Qusic/miniray/internal/protocol"
 )
+
+// bubble runs f in a synctest bubble, and panics if f is still running after
+// an hour of fake time, far longer than any test here takes. Heartbeats on
+// streams with this program at both ends, and spokes retrying their
+// registration, keep waking the bubble, so synctest never finds a stuck test
+// deadlocked, and it would run on until the test binary times out.
+func bubble(t *testing.T, f func(*testing.T)) {
+	synctest.Test(t, func(t *testing.T) {
+		stuck := time.AfterFunc(time.Hour, func() {
+			debug.SetTraceback("all") // to show where the test is stuck
+			panic(t.Name() + " still running after an hour of fake time")
+		})
+		t.Cleanup(func() { stuck.Stop() }) // after f's cleanups, which may get stuck too
+		f(t)
+	})
+}
 
 // quiet discards the logs of handlers, hubs, and spokes under test.
 var quiet = slog.New(slog.DiscardHandler)

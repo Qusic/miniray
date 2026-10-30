@@ -12,7 +12,6 @@ import (
 	"net/http/httptest"
 	"slices"
 	"testing"
-	"testing/synctest"
 	"time"
 
 	"github.com/Qusic/miniray/internal/netutil"
@@ -43,7 +42,7 @@ func request(t *testing.T, w io.Writer, p protocol.Trojan, command protocol.Troj
 }
 
 func TestTrojanHandler(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	bubble(t, func(t *testing.T) {
 		p := protocol.NewTrojan("secret")
 		srv, targets := echoServer(t, p)
 
@@ -130,7 +129,7 @@ func TestTrojanHandlerRejectsRequest(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
+			bubble(t, func(t *testing.T) {
 				finished := make(chan struct{})
 				routed := make(chan struct{}, 1)
 				handler := trojanHandler{
@@ -173,7 +172,7 @@ func TestTrojanHandlerRejectsRequest(t *testing.T) {
 // its server. It answers 502 when the target cannot be reached, and 400,
 // without dialing, to a malformed target or any other request.
 func TestHTTPProxyHandler(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	bubble(t, func(t *testing.T) {
 		web := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			io.WriteString(w, "served "+r.Host+r.URL.Path)
 		}))
@@ -274,7 +273,7 @@ func TestHTTPProxyHandler(t *testing.T) {
 // and half-closed, a target that cannot half-close may still take a while to
 // respond.
 func TestHTTPProxyConnectWaitsForResponse(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	bubble(t, func(t *testing.T) {
 		target, server := net.Pipe()
 		defer server.Close()
 		proxy := httptest.NewTestServer(t, newHTTPProxyHandler(func(context.Context, netutil.Address, uint16) (net.Conn, error) {
@@ -330,7 +329,7 @@ func (l testListener) Addr() net.Addr { return &net.TCPAddr{} }
 // the connection at once when the target cannot be reached, and keeps
 // accepting after a failed accept until its listener is closed.
 func TestTCPHandler(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	bubble(t, func(t *testing.T) {
 		var dialed []string
 		unreachable := false
 		h := tcpHandler{
@@ -391,7 +390,7 @@ func TestTCPHandler(t *testing.T) {
 // half-closed, a target that cannot half-close may still take a while to
 // respond.
 func TestTCPHandlerWaitsForResponse(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	bubble(t, func(t *testing.T) {
 		target, server := net.Pipe()
 		defer server.Close()
 		h := tcpHandler{
@@ -482,7 +481,7 @@ level=DEBUG msg="request ended" remote=* target=ssh.example.com:22 duration=1s e
 		}, refusedLog},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
+			bubble(t, func(t *testing.T) {
 				var logs bytes.Buffer
 				tt.serve(t, textLog(&logs))
 				if got := logs.String(); got != tt.want {
