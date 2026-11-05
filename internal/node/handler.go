@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -81,6 +82,12 @@ func (h trojanHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	log.Debug("request ended", "duration", time.Since(start).Round(time.Millisecond), "err", err)
 }
 
+// reuseTimeout is how long an HTTP proxy keeps an idle connection to a
+// target's server for the next request: long enough for a page load, yet
+// shorter than servers keep theirs, commonly a few seconds, so that no request
+// lands on a connection the server is closing.
+const reuseTimeout = time.Second
+
 // httpProxyHandler serves an HTTP proxy without authentication. A CONNECT
 // request has its stream joined with the target, and a request for an http URL
 // is passed on to the target's server.
@@ -102,8 +109,8 @@ func newHTTPProxyHandler(dial dialFunc, log *slog.Logger) httpProxyHandler {
 				}
 				return dial(ctx, host, port)
 			},
-			// Every request gets a connection of its own, so none lingers idle.
-			DisableKeepAlives: true,
+			IdleConnTimeout:     reuseTimeout,
+			MaxIdleConnsPerHost: math.MaxInt, // no limit; 0 would mean 2
 		},
 		dial: dial,
 		log:  log,

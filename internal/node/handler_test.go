@@ -11,7 +11,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Qusic/miniray/internal/netutil"
@@ -265,6 +267,65 @@ func TestHTTPProxyHandler(t *testing.T) {
 		}
 		if !slices.Equal(dialed, want) {
 			t.Errorf("dialed %q, want %q", dialed, want)
+		}
+	})
+}
+
+// Requests for http URLs reuse every connection that earlier requests to the
+// same server left, if they come within reuseTimeout; after that, the
+// connections are closed.
+func TestHTTPProxyReusesConnections(t *testing.T) {
+	bubble(t, func(t *testing.T) {
+		gate := make(chan struct{})
+		web := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			<-gate
+			io.WriteString(w, "hello")
+		}))
+		var dials atomic.Int32 // a burst dials concurrently
+		proxy := httptest.NewTestServer(t, newHTTPProxyHandler(func(ctx context.Context, host netutil.Address, port uint16) (net.Conn, error) {
+			dials.Add(1)
+			return memoryDial(web)(ctx, host, port)
+		}, quiet))
+		// burst sends n requests at once and holds them at the server until all
+		// have arrived, so that each needs a connection of its own.
+		burst := func(n int) {
+			t.Helper()
+			var readers []*bufio.Reader
+			for range n {
+				conn, err := memoryDial(proxy)(t.Context(), domainAddress(t, "proxy.example.com"), 3128)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer conn.Close()
+				write(t, conn, []byte("GET http://web.example.com/ HTTP/1.1\r\nHost: web.example.com\r\n\r\n"))
+				readers = append(readers, bufio.NewReader(conn))
+			}
+			synctest.Wait() // until every request waits at the server
+			for range n {
+				gate <- struct{}{}
+			}
+			for _, r := range readers {
+				resp, err := http.ReadResponse(r, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				read(t, resp.Body, "hello")
+			}
+			// Let the proxy put the connections back before the next burst.
+			synctest.Wait()
+		}
+
+		// Three is one more than net/http keeps idle by default.
+		burst(3)
+		burst(3)
+		if n := dials.Load(); n != 3 {
+			t.Errorf("%d dials for two bursts of 3 requests, want 3", n)
+		}
+		time.Sleep(reuseTimeout)
+		synctest.Wait() // for the proxy to close the idle connections
+		burst(1)
+		if n := dials.Load(); n != 4 {
+			t.Errorf("%d dials in all after a pause of reuseTimeout, want 4", n)
 		}
 	})
 }
