@@ -139,8 +139,9 @@ func TestRoutesEndSoonAfterTarget(t *testing.T) {
 
 // dialTunnel reaches the node's own aliases directly and other nodes' through
 // the hub: on the hub by asking the spoke, elsewhere by way of the hub's tunnel
-// ingress. The context is already canceled, so a target that does reach
-// dialing fails with context.Canceled, and no case touches the network.
+// ingress. Every node refuses the names of spokes' streams. The context is
+// already canceled, so a target that does reach dialing fails with
+// context.Canceled, and no case touches the network.
 func TestDialTunnel(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -160,7 +161,8 @@ func TestDialTunnel(t *testing.T) {
 		{"spoke's alias on the hub", hub, "web.lab.tunnel", "spoke lab is not registered"},
 		{"own alias elsewhere", lab, "web.lab.tunnel", ""},
 		{"other alias elsewhere", lab, "web.hub.tunnel", "asked the hub for web.hub.tunnel:1"},
-		{"no alias", hub, "lab.tunnel", "names no alias"},
+		{"no alias on the hub", hub, "lab.tunnel", "names no alias"},
+		{"no alias elsewhere", lab, "hub.tunnel", "names no alias"},
 		{"malformed name", lab, "a.b.c.tunnel", "neither"},
 	} {
 		conn, err := tt.r.dialTunnel(ctx, domainAddress(t, tt.host), 1)

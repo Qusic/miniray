@@ -38,7 +38,6 @@ type router struct {
 // data streams go to the hub. Other requests are dialed: aliases by their
 // virtual names, and ordinary hosts directly.
 func (r router) routeTunnel(ctx context.Context, conn net.Conn, host netutil.Address, port uint16) error {
-	dial := dialFunc(dialDirect)
 	if tunnel.IsName(host.Domain()) {
 		t, err := tunnel.ParseTarget(host.Domain(), port)
 		if err != nil {
@@ -47,9 +46,8 @@ func (r router) routeTunnel(ctx context.Context, conn net.Conn, host netutil.Add
 		if t.Kind != tunnel.Route {
 			return r.hub.Serve(ctx, conn, t)
 		}
-		dial = r.dialTunnel
 	}
-	target, err := dial(ctx, host, port)
+	target, err := r.dialTunnel(ctx, host, port)
 	if err != nil {
 		return err
 	}
@@ -58,8 +56,13 @@ func (r router) routeTunnel(ctx context.Context, conn net.Conn, host netutil.Add
 
 // dialTunnel connects to an alias by its virtual name, alias.node.tunnel: to
 // the node's own aliases directly, and to other nodes' through the hub, on the
-// hub itself or by way of it.
+// hub itself or by way of it. It dials ordinary hosts directly, and refuses
+// node.tunnel, the name of a spoke's control and data streams, so that callers
+// cannot pose as a spoke.
 func (r router) dialTunnel(ctx context.Context, host netutil.Address, port uint16) (net.Conn, error) {
+	if !tunnel.IsName(host.Domain()) {
+		return dialDirect(ctx, host, port)
+	}
 	t, err := tunnel.ParseTarget(host.Domain(), port)
 	if err != nil {
 		return nil, err

@@ -103,8 +103,8 @@ func TestLoadTopology(t *testing.T) {
 }
 
 // A node holds the credentials of the endpoints it has or uses: the hub serves
-// tunnel, other nodes with egress or forward connect to it, optionally through
-// relay, and public and proxy ingress use relay.
+// tunnel, other nodes with link ingress, egress, or forward connect to it,
+// optionally through relay, and public and proxy ingress use relay.
 func TestUsedCredentials(t *testing.T) {
 	egress := map[netutil.Label]netutil.Address{"git": mustAddress(t, "192.0.2.11")}
 	forward := map[netutil.Label]map[netutil.Label][]PortMapping{"hub": {"nas": {{Listen: 1028, Target: 22}}}}
@@ -119,6 +119,7 @@ func TestUsedCredentials(t *testing.T) {
 		{"egress", Node{Egress: egress}, true, false},
 		{"egress through relay", Node{Egress: egress, Option: Options{Relay: true}}, true, true},
 		{"forward through relay", Node{Forward: forward, Option: Options{Relay: true}}, true, true},
+		{"link", Node{Ingress: Ingress{Link: 3128}}, true, false},
 		{"public", Node{Ingress: Ingress{Public: 80}}, false, true},
 		{"private", Node{Ingress: Ingress{Private: 2000}}, false, false},
 		{"option.relay without hub connection", Node{Ingress: Ingress{Private: 2000}, Option: Options{Relay: true}}, false, false},

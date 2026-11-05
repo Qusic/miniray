@@ -168,9 +168,11 @@ func TestAssembleIngresses(t *testing.T) {
 	}
 }
 
-// private and proxy are HTTP proxies: private dials straight from this node,
-// so it refuses .tunnel names, while proxy reaches every target through the
-// relay's public ingress.
+// link, private, and proxy are HTTP proxies. private dials straight from this
+// node and refuses .tunnel names. link dials ordinary hosts straight too, and
+// reaches aliases by their virtual names: the node's own directly, and other
+// nodes' through the hub's tunnel ingress. proxy reaches every target through
+// the relay's public ingress.
 func TestAssembleHTTPProxies(t *testing.T) {
 	target := echoing(t)
 	relayed := make(chan string, 1)
@@ -186,25 +188,60 @@ func TestAssembleHTTPProxies(t *testing.T) {
 		},
 	})
 	defer relay.Close()
+	tunneled := make(chan string, 1)
+	hub := httptest.NewServer(trojanHandler{
+		path:   "/tunnel",
+		trojan: protocol.NewTrojan("tunnel-secret"),
+		log:    quiet,
+		route: func(_ context.Context, conn net.Conn, host netutil.Address, port uint16) error {
+			tunneled <- joinHostPort(host, port)
+			return netutil.Join(conn, echo())
+		},
+	})
+	defer hub.Close()
 
 	servers, _ := assemble(config.Config{
-		Name:       "desk",
-		Credential: config.Credentials{Relay: credential(t, "ws://:relay-secret@"+relay.Listener.Addr().String()+"/relay")},
-		Node:       config.Node{Ingress: config.Ingress{Private: 3128, Proxy: 3129}},
+		Name: "desk",
+		Credential: config.Credentials{
+			Tunnel: credential(t, "ws://:tunnel-secret@"+hub.Listener.Addr().String()+"/tunnel"),
+			Relay:  credential(t, "ws://:relay-secret@"+relay.Listener.Addr().String()+"/relay"),
+		},
+		Node: config.Node{
+			Ingress: config.Ingress{Link: 3127, Private: 3128, Proxy: 3129},
+			Egress:  map[netutil.Label]netutil.Address{"web": ipAddress(t, "127.0.0.1")},
+		},
 	})
-	if got, want := addresses(servers), []string{"ingress.private :3128", "ingress.proxy :3129"}; !slices.Equal(got, want) {
+	if got, want := addresses(servers), []string{"ingress.link :3127", "ingress.private :3128", "ingress.proxy :3129"}; !slices.Equal(got, want) {
 		t.Fatalf("servers %q, want %q", got, want)
 	}
-	private, proxy := serving(t, servers[0]), serving(t, servers[1])
+	link, private, proxy := serving(t, servers[0]), serving(t, servers[1]), serving(t, servers[2])
+	own := joinHostPort(domainAddress(t, "web.desk.tunnel"), uint16(target.Port))
 
+	// asked checks that a handler was asked for want, if anything.
+	asked := func(name, handler string, requests <-chan string, want string) {
+		t.Helper()
+		select {
+		case got := <-requests:
+			if got != want {
+				t.Errorf("%s: the %s was asked for %s, want %q", name, handler, got, want)
+			}
+		default:
+			if want != "" {
+				t.Errorf("%s: bypassed the %s", name, handler)
+			}
+		}
+	}
 	for _, tt := range []struct {
 		name, proxy, target string
 		status              int
-		relayed             string // what the relay is asked for, if anything
+		relayed, tunneled   string // what the relay and the hub are asked for, if anything
 	}{
-		{"private", private, target.String(), http.StatusOK, ""},
-		{"private virtual name", private, "web.hub.tunnel:80", http.StatusBadGateway, ""},
-		{"proxy", proxy, "ssh.example.com:22", http.StatusOK, "ssh.example.com:22"},
+		{"private", private, target.String(), http.StatusOK, "", ""},
+		{"private virtual name", private, own, http.StatusBadGateway, "", ""},
+		{"link", link, target.String(), http.StatusOK, "", ""},
+		{"link own alias", link, own, http.StatusOK, "", ""},
+		{"link other alias", link, "nas.lab.tunnel:22", http.StatusOK, "", "nas.lab.tunnel:22"},
+		{"proxy", proxy, "ssh.example.com:22", http.StatusOK, "ssh.example.com:22", ""},
 	} {
 		conn, err := net.DialTimeout("tcp", tt.proxy, 5*time.Second)
 		if err != nil {
@@ -219,16 +256,8 @@ func TestAssembleHTTPProxies(t *testing.T) {
 			read(t, reader, "hello")
 		}
 		conn.Close()
-		select {
-		case got := <-relayed:
-			if got != tt.relayed {
-				t.Errorf("%s: the relay was asked for %s, want %q", tt.name, got, tt.relayed)
-			}
-		default:
-			if tt.relayed != "" {
-				t.Errorf("%s: bypassed the relay", tt.name)
-			}
-		}
+		asked(tt.name, "relay", relayed, tt.relayed)
+		asked(tt.name, "hub", tunneled, tt.tunneled)
 	}
 }
 

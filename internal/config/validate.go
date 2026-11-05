@@ -51,7 +51,7 @@ func (c Config) validate() error {
 		held, used bool
 		users      string
 	}{
-		{"tunnel", !c.Credential.Tunnel.IsZero(), tunnel, "ingress.tunnel, egress, or forward"},
+		{"tunnel", !c.Credential.Tunnel.IsZero(), tunnel, "ingress.tunnel, ingress.link, egress, or forward"},
 		{"relay", !c.Credential.Relay.IsZero(), relay, "ingress.public, ingress.proxy, or option.relay on a node that connects to the hub"},
 	} {
 		switch {
@@ -100,6 +100,7 @@ func (n Node) validate() error {
 		port uint16
 	}{
 		{"ingress.tunnel", n.Ingress.Tunnel},
+		{"ingress.link", n.Ingress.Link},
 		{"ingress.private", n.Ingress.Private},
 		{"ingress.public", n.Ingress.Public},
 		{"ingress.proxy", n.Ingress.Proxy},

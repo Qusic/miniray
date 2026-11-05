@@ -85,6 +85,12 @@ func assemble(cfg config.Config) (servers []server, spoke *tunnel.Spoke) {
 			slog.With("server", "ingress.tunnel"),
 		).serve)
 	}
+	if cfg.Ingress.Link != 0 {
+		add("ingress.link", cfg.Ingress.Link, newHTTPProxyHandler(
+			r.dialTunnel,
+			slog.With("server", "ingress.link"),
+		).serve)
+	}
 	if cfg.Ingress.Private != 0 {
 		add("ingress.private", cfg.Ingress.Private, newHTTPProxyHandler(
 			dialDirect,

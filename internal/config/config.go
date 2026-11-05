@@ -68,9 +68,9 @@ func (c Config) Save(path string) error {
 }
 
 // Credentials are two separate trust domains. Tunnel secures the private
-// channel through the hub: its ingress, egress registration, and forwards to
-// other nodes. Relay secures the public ingress, which reaches only ordinary
-// hosts, so it can be shared without opening the tunnel.
+// channel through the hub: its ingress, egress registration, and the way to
+// other nodes' aliases. Relay secures the public ingress, which reaches only
+// ordinary hosts, so it can be shared without opening the tunnel.
 type Credentials struct {
 	Tunnel Credential `json:"tunnel,omitzero"`
 	Relay  Credential `json:"relay,omitzero"`
@@ -156,25 +156,27 @@ type Node struct {
 
 // usedCredentials reports which credentials the node uses: those of the
 // endpoints it has and of those it uses. A node with tunnel ingress has the
-// hub, and every other node with egress or forwards uses it to register its
-// aliases or reach other nodes' aliases. A node with public ingress has a
-// relay; the proxy ingress uses one, and so does the connection to the hub
-// with option.relay.
+// hub, and every other node with link ingress, egress, or forwards uses it to
+// register its aliases or reach other nodes' aliases. A node with public
+// ingress has a relay; the proxy ingress uses one, and so does the connection
+// to the hub with option.relay.
 func (n Node) usedCredentials() (tunnel, relay bool) {
 	hasHub := n.Ingress.Tunnel != 0
-	usesHub := !hasHub && (len(n.Egress) != 0 || len(n.Forward) != 0)
+	usesHub := !hasHub && (n.Ingress.Link != 0 || len(n.Egress) != 0 || len(n.Forward) != 0)
 	hasRelay := n.Ingress.Public != 0
 	usesRelay := n.Ingress.Proxy != 0 || (n.Option.Relay && usesHub)
 	return hasHub || usesHub, hasRelay || usesRelay
 }
 
 // Ingress holds the local port of each ingress; 0 means disabled. Tunnel and
-// public serve Trojan over WebSocket with the tunnel and relay credentials.
-// Private and proxy are HTTP proxies without authentication, for the local
-// machine or a private network; private dials directly and proxy through the
-// relay, and neither reaches .tunnel names, which forwards do.
+// public serve Trojan over WebSocket with the tunnel and relay credentials;
+// link, private, and proxy are HTTP proxies without authentication, for the
+// local machine or a private network. Proxy reaches hosts through the relay,
+// and the others dial them directly; only tunnel and link also reach aliases
+// by their .tunnel names.
 type Ingress struct {
 	Tunnel  uint16 `json:"tunnel,omitzero"`
+	Link    uint16 `json:"link,omitzero"`
 	Private uint16 `json:"private,omitzero"`
 	Public  uint16 `json:"public,omitzero"`
 	Proxy   uint16 `json:"proxy,omitzero"`

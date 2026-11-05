@@ -47,7 +47,7 @@ const fullConfig = `{
     "tunnel": "wss://:tunnel-secret@hub.example.com/tunnel",
     "relay": "wss://:relay%2Fsecret@relay.example.com/relay"
   },
-  "ingress": {"tunnel": 80, "proxy": 1080},
+  "ingress": {"tunnel": 80, "link": 3128, "proxy": 1080},
   "egress": {"app": "localhost", "git": "192.0.2.10"},
   "forward": {"hub": {"git": ["2202:22"]}, "peer": {"remote": ["2208:2209", "1028:65535"]}},
   "option": {"local": true, "relay": true}
@@ -66,7 +66,7 @@ func TestDecodeConfig(t *testing.T) {
 			Relay: Credential{url: url.URL{Scheme: "wss", User: url.UserPassword("", "relay/secret"), Host: "relay.example.com", Path: "/relay"}},
 		},
 		Node: Node{
-			Ingress: Ingress{Tunnel: 80, Proxy: 1080},
+			Ingress: Ingress{Tunnel: 80, Link: 3128, Proxy: 1080},
 			Egress:  map[netutil.Label]netutil.Address{"app": mustAddress(t, "localhost"), "git": mustAddress(t, "192.0.2.10")},
 			Forward: map[netutil.Label]map[netutil.Label][]PortMapping{
 				"hub":  {"git": {{Listen: 2202, Target: 22}}},
@@ -168,6 +168,7 @@ func TestDecodeRejectsInvalidConfig(t *testing.T) {
 		{name: "identical trust paths", data: strings.Replace(publicRelay, "relay.example.com/relay", "relay.example.com/tunnel", 1), want: "paths must differ"},
 		// The handler compares decoded paths, so escaping does not make them differ.
 		{name: "identical escaped trust paths", data: strings.Replace(publicRelay, "relay.example.com/relay", "relay.example.com/%74unnel", 1), want: "paths must differ"},
+		{name: "duplicate ingress port", data: strings.Replace(node, `"tunnel": 8080}`, `"tunnel": 8080, "link": 8080}`, 1), want: "ingress.link: local port 8080 is already used by ingress.tunnel"},
 		{name: "duplicate local port", data: base + `, "forward": {"peer": {"remote": ["8080:22"]}}}`, want: "forward.peer.remote: local port 8080 is already used by ingress.tunnel"},
 		{name: "missing own alias", data: base + `, "forward": {"hub": {"git": ["2202:22"]}}}`, want: "forward.hub.git: node hub has no egress alias git"},
 		{name: "bad egress alias", data: base + `, "egress": {"Git": "192.0.2.10"}}`, want: `"Git" is not a lowercase DNS label`},
