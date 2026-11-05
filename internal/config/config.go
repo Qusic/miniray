@@ -68,9 +68,9 @@ func (c Config) Save(path string) error {
 }
 
 // Credentials are two separate trust domains. Tunnel secures the private
-// channel through the hub: its ingress, egress registration, and links. Relay
-// secures the public ingress, which reaches only ordinary hosts, so it can be
-// shared without opening the tunnel.
+// channel through the hub: its ingress, egress registration, and forwards to
+// other nodes. Relay secures the public ingress, which reaches only ordinary
+// hosts, so it can be shared without opening the tunnel.
 type Credentials struct {
 	Tunnel Credential `json:"tunnel,omitzero"`
 	Relay  Credential `json:"relay,omitzero"`
@@ -150,20 +150,19 @@ func validPort(port string) bool {
 type Node struct {
 	Ingress Ingress                                           `json:"ingress,omitzero"`
 	Egress  map[netutil.Label]netutil.Address                 `json:"egress,omitempty"`
-	Forward map[netutil.Label][]PortMapping                   `json:"forward,omitempty"`
-	Link    map[netutil.Label]map[netutil.Label][]PortMapping `json:"link,omitempty"`
+	Forward map[netutil.Label]map[netutil.Label][]PortMapping `json:"forward,omitempty"`
 	Option  Options                                           `json:"option,omitzero"`
 }
 
 // usedCredentials reports which credentials the node uses: those of the
 // endpoints it has and of those it uses. A node with tunnel ingress has the
-// hub, and every other node with egress or links uses it to register its
-// aliases or reach its links. A node with public ingress has a relay; the
-// proxy ingress uses one, and so does the connection to the hub with
-// option.relay.
+// hub, and every other node with egress or forwards uses it to register its
+// aliases or reach other nodes' aliases. A node with public ingress has a
+// relay; the proxy ingress uses one, and so does the connection to the hub
+// with option.relay.
 func (n Node) usedCredentials() (tunnel, relay bool) {
 	hasHub := n.Ingress.Tunnel != 0
-	usesHub := !hasHub && (len(n.Egress) != 0 || len(n.Link) != 0)
+	usesHub := !hasHub && (len(n.Egress) != 0 || len(n.Forward) != 0)
 	hasRelay := n.Ingress.Public != 0
 	usesRelay := n.Ingress.Proxy != 0 || (n.Option.Relay && usesHub)
 	return hasHub || usesHub, hasRelay || usesRelay
@@ -173,7 +172,7 @@ func (n Node) usedCredentials() (tunnel, relay bool) {
 // public serve Trojan over WebSocket with the tunnel and relay credentials.
 // Private and proxy are HTTP proxies without authentication, for the local
 // machine or a private network; private dials directly and proxy through the
-// relay, and neither reaches .tunnel names, which links do.
+// relay, and neither reaches .tunnel names, which forwards do.
 type Ingress struct {
 	Tunnel  uint16 `json:"tunnel,omitzero"`
 	Private uint16 `json:"private,omitzero"`
@@ -181,8 +180,8 @@ type Ingress struct {
 	Proxy   uint16 `json:"proxy,omitzero"`
 }
 
-// PortMapping is "listen:target" in JSON. Forward targets a local egress alias;
-// Link's target alias belongs to the remote node.
+// PortMapping is "listen:target" in JSON: a forward listens on the local port
+// and connects to the target port of its alias, on this node or another.
 type PortMapping struct {
 	Listen uint16
 	Target uint16

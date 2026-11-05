@@ -8,7 +8,7 @@ import (
 )
 
 // validate checks the topology as a whole: its trust domains, every node's
-// config, and that each link names an egress alias of an existing node.
+// config, and that each forward names an egress alias of an existing node.
 func (t Topology) validate() error {
 	if len(t.Node) == 0 {
 		return errors.New("no nodes")
@@ -20,14 +20,14 @@ func (t Topology) validate() error {
 		if err := t.config(name).validate(); err != nil {
 			return fmt.Errorf("node %s: %w", name, err)
 		}
-		for peer, aliases := range t.Node[name].Link {
-			target, ok := t.Node[peer]
+		for node, aliases := range t.Node[name].Forward {
+			target, ok := t.Node[node]
 			if !ok {
-				return fmt.Errorf("node %s: link.%s: no such node", name, peer)
+				return fmt.Errorf("node %s: forward.%s: no such node", name, node)
 			}
 			for alias := range aliases {
 				if _, ok := target.Egress[alias]; !ok {
-					return fmt.Errorf("node %s: link.%s.%s: node %s has no egress alias %s", name, peer, alias, peer, alias)
+					return fmt.Errorf("node %s: forward.%s.%s: node %s has no egress alias %s", name, node, alias, node, alias)
 				}
 			}
 		}
@@ -35,8 +35,9 @@ func (t Topology) validate() error {
 	return nil
 }
 
-// validate checks that the config names its node and holds exactly the
-// credentials the node uses.
+// validate checks that the config names its node, holds exactly the
+// credentials the node uses, and has the egress alias of each forward to
+// itself.
 func (c Config) validate() error {
 	if c.Name == "" {
 		return errors.New("name is required")
@@ -50,7 +51,7 @@ func (c Config) validate() error {
 		held, used bool
 		users      string
 	}{
-		{"tunnel", !c.Credential.Tunnel.IsZero(), tunnel, "ingress.tunnel, egress, or link"},
+		{"tunnel", !c.Credential.Tunnel.IsZero(), tunnel, "ingress.tunnel, egress, or forward"},
 		{"relay", !c.Credential.Relay.IsZero(), relay, "ingress.public, ingress.proxy, or option.relay on a node that connects to the hub"},
 	} {
 		switch {
@@ -58,6 +59,11 @@ func (c Config) validate() error {
 			return fmt.Errorf("credential.%s is required by %s", entry.name, entry.users)
 		case entry.held && !entry.used:
 			return fmt.Errorf("credential.%s is not used by this node", entry.name)
+		}
+	}
+	for alias := range c.Forward[c.Name] {
+		if _, ok := c.Egress[alias]; !ok {
+			return fmt.Errorf("forward.%s.%s: node %s has no egress alias %s", c.Name, alias, c.Name, alias)
 		}
 	}
 	return c.Node.validate()
@@ -79,8 +85,7 @@ func (c Credentials) validate() error {
 	return nil
 }
 
-// validate gives each local listener its own port and points each forward at
-// a local egress alias.
+// validate gives each local listener its own port.
 func (n Node) validate() error {
 	ports := make(map[uint16]string)
 	claim := func(port uint16, owner string) error {
@@ -105,20 +110,10 @@ func (n Node) validate() error {
 			}
 		}
 	}
-	for alias, mappings := range n.Forward {
-		if _, ok := n.Egress[alias]; !ok {
-			return fmt.Errorf("forward.%s: no local egress alias", alias)
-		}
-		for _, mapping := range mappings {
-			if err := claim(mapping.Listen, fmt.Sprintf("forward.%s", alias)); err != nil {
-				return err
-			}
-		}
-	}
-	for node, aliases := range n.Link {
+	for node, aliases := range n.Forward {
 		for alias, mappings := range aliases {
 			for _, mapping := range mappings {
-				if err := claim(mapping.Listen, fmt.Sprintf("link.%s.%s", node, alias)); err != nil {
+				if err := claim(mapping.Listen, fmt.Sprintf("forward.%s.%s", node, alias)); err != nil {
 					return err
 				}
 			}

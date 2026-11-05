@@ -232,10 +232,10 @@ func TestAssembleHTTPProxies(t *testing.T) {
 	}
 }
 
-// forward and link servers listen on their local ports in a fixed order. A
-// forward dials its egress host directly; a link reaches its alias by virtual
-// name, from a node other than the hub through the hub's tunnel ingress.
-func TestAssembleForwardAndLink(t *testing.T) {
+// forward servers listen on their local ports in a fixed order. They reach the
+// node's own aliases directly, and other nodes' through the hub's tunnel
+// ingress.
+func TestAssembleForward(t *testing.T) {
 	web := echoing(t)
 	targets := make(chan string, 1)
 	hub := httptest.NewServer(trojanHandler{
@@ -253,16 +253,16 @@ func TestAssembleForwardAndLink(t *testing.T) {
 		Name:       "lab",
 		Credential: config.Credentials{Tunnel: credential(t, "ws://:tunnel-secret@"+hub.Listener.Addr().String()+"/tunnel")},
 		Node: config.Node{
-			Egress:  map[netutil.Label]netutil.Address{"web": ipAddress(t, "127.0.0.1")},
-			Forward: map[netutil.Label][]config.PortMapping{"web": {{Listen: 2001, Target: uint16(web.Port)}}},
-			Link: map[netutil.Label]map[netutil.Label][]config.PortMapping{
+			Egress: map[netutil.Label]netutil.Address{"web": ipAddress(t, "127.0.0.1")},
+			Forward: map[netutil.Label]map[netutil.Label][]config.PortMapping{
 				"other": {"nas": {{Listen: 2003, Target: 22}}},
+				"lab":   {"web": {{Listen: 2001, Target: uint16(web.Port)}}},
 				"hub":   {"web": {{Listen: 2004, Target: 80}, {Listen: 2002, Target: 8080}}},
 			},
 			Option: config.Options{Local: true},
 		},
 	})
-	want := []string{"forward.web 127.0.0.1:2001", "link.hub.web 127.0.0.1:2004", "link.hub.web 127.0.0.1:2002", "link.other.nas 127.0.0.1:2003"}
+	want := []string{"forward.hub.web 127.0.0.1:2004", "forward.hub.web 127.0.0.1:2002", "forward.lab.web 127.0.0.1:2001", "forward.other.nas 127.0.0.1:2003"}
 	if got := addresses(servers); !slices.Equal(got, want) {
 		t.Fatalf("servers %q, want %q", got, want)
 	}
@@ -271,7 +271,7 @@ func TestAssembleForwardAndLink(t *testing.T) {
 		server server
 		hub    string // what the hub is asked for, if the server goes through it
 	}{
-		{servers[0], ""},
+		{servers[2], ""},
 		{servers[3], "nas.other.tunnel:22"},
 	} {
 		conn, err := net.DialTimeout("tcp", serving(t, tt.server), 5*time.Second)

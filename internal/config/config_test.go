@@ -49,8 +49,7 @@ const fullConfig = `{
   },
   "ingress": {"tunnel": 80, "proxy": 1080},
   "egress": {"app": "localhost", "git": "192.0.2.10"},
-  "forward": {"git": ["2202:22"]},
-  "link": {"peer": {"remote": ["2208:2209", "1028:65535"]}},
+  "forward": {"hub": {"git": ["2202:22"]}, "peer": {"remote": ["2208:2209", "1028:65535"]}},
   "option": {"local": true, "relay": true}
 }`
 
@@ -69,9 +68,11 @@ func TestDecodeConfig(t *testing.T) {
 		Node: Node{
 			Ingress: Ingress{Tunnel: 80, Proxy: 1080},
 			Egress:  map[netutil.Label]netutil.Address{"app": mustAddress(t, "localhost"), "git": mustAddress(t, "192.0.2.10")},
-			Forward: map[netutil.Label][]PortMapping{"git": {{Listen: 2202, Target: 22}}},
-			Link:    map[netutil.Label]map[netutil.Label][]PortMapping{"peer": {"remote": {{Listen: 2208, Target: 2209}, {Listen: 1028, Target: 65535}}}},
-			Option:  Options{Local: true, Relay: true},
+			Forward: map[netutil.Label]map[netutil.Label][]PortMapping{
+				"hub":  {"git": {{Listen: 2202, Target: 22}}},
+				"peer": {"remote": {{Listen: 2208, Target: 2209}, {Listen: 1028, Target: 65535}}},
+			},
+			Option: Options{Local: true, Relay: true},
 		},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -162,15 +163,15 @@ func TestDecodeRejectsInvalidConfig(t *testing.T) {
 		{name: "public without relay", data: public, want: "credential.relay is required"},
 		{name: "proxy without relay", data: strings.Replace(public, `"public"`, `"proxy"`, 1), want: "credential.relay is required"},
 		{name: "relay hop without relay", data: `{"name": "peer", "credential": {"tunnel": ` + tunnel + `}, "egress": {"git": "192.0.2.11"}, "option": {"relay": true}}`, want: "credential.relay is required"},
-		{name: "link without tunnel", data: `{"name": "laptop", "link": {"peer": {"remote": ["9000:22"]}}}`, want: "credential.tunnel is required"},
+		{name: "forward without tunnel", data: `{"name": "laptop", "forward": {"peer": {"remote": ["9000:22"]}}}`, want: "credential.tunnel is required"},
 		{name: "identical trust passwords", data: strings.Replace(publicRelay, "relay-secret@", "tunnel-secret@", 1), want: "passwords must differ"},
 		{name: "identical trust paths", data: strings.Replace(publicRelay, "relay.example.com/relay", "relay.example.com/tunnel", 1), want: "paths must differ"},
 		// The handler compares decoded paths, so escaping does not make them differ.
 		{name: "identical escaped trust paths", data: strings.Replace(publicRelay, "relay.example.com/relay", "relay.example.com/%74unnel", 1), want: "paths must differ"},
-		{name: "duplicate local port", data: base + `, "link": {"peer": {"remote": ["8080:22"]}}}`, want: "already used"},
-		{name: "missing local alias", data: base + `, "forward": {"git": ["2202:22"]}}`, want: "no local egress alias"},
+		{name: "duplicate local port", data: base + `, "forward": {"peer": {"remote": ["8080:22"]}}}`, want: "forward.peer.remote: local port 8080 is already used by ingress.tunnel"},
+		{name: "missing own alias", data: base + `, "forward": {"hub": {"git": ["2202:22"]}}}`, want: "forward.hub.git: node hub has no egress alias git"},
 		{name: "bad egress alias", data: base + `, "egress": {"Git": "192.0.2.10"}}`, want: `"Git" is not a lowercase DNS label`},
-		{name: "bad remote alias", data: base + `, "link": {"peer": {"remote.alias": ["2202:22"]}}}`, want: `"remote.alias" is not a lowercase DNS label`},
+		{name: "bad remote alias", data: base + `, "forward": {"peer": {"remote.alias": ["2202:22"]}}}`, want: `"remote.alias" is not a lowercase DNS label`},
 		{name: "empty egress host", data: base + `, "egress": {"app": ""}}`, want: "domain length 0"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

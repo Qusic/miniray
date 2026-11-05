@@ -78,8 +78,8 @@ func (r router) dialTunnel(ctx context.Context, host netutil.Address, port uint1
 // aliases maps the node's aliases to their hosts.
 type aliases map[netutil.Label]netutil.Address
 
-// dial dials alias:port on the alias's host directly. It routes the hub's own
-// aliases and the connections a spoke opens for the hub.
+// dial dials alias:port on the alias's host directly. It routes the node's own
+// aliases for dialTunnel, and the connections a spoke opens for the hub.
 func (a aliases) dial(ctx context.Context, alias netutil.Label, port uint16) (net.Conn, error) {
 	host, ok := a[alias]
 	if !ok {

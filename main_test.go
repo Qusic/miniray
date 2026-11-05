@@ -69,7 +69,7 @@ func TestPrepareWritesNothingForInvalidTopology(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "home.json")
 	// hub is valid and sorts first; relay's error must still prevent every write.
-	invalid := strings.Replace(testTopology, `"public": 8081 }`, `"public": 8081 }, "forward": { "nas": ["2202:22"] }`, 1)
+	invalid := strings.Replace(testTopology, `"public": 8081 }`, `"public": 8081 }, "forward": { "relay": { "nas": ["2202:22"] } }`, 1)
 	if err := os.WriteFile(path, []byte(invalid), 0o600); err != nil {
 		t.Fatal(err)
 	}

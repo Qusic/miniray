@@ -23,8 +23,7 @@ const topology = `{
     "hub": {
       "ingress": { "tunnel": 8080, "proxy": 1080 },
       "egress": { "nas": "192.0.2.10" },
-      "forward": { "nas": ["2202:22"] },
-      "link": { "peer": { "git": ["2208:2209"] } }
+      "forward": { "hub": { "nas": ["2202:22"] }, "peer": { "git": ["2208:2209"] } }
     },
     "peer": {
       "egress": { "git": "192.0.2.11" },
@@ -32,7 +31,7 @@ const topology = `{
     },
     "relay": { "ingress": { "public": 80 } },
     "laptop": {
-      "link": { "hub": { "nas": ["1028:22"] }, "peer": { "git": ["2213:2214"] } },
+      "forward": { "hub": { "nas": ["1028:22"] }, "peer": { "git": ["2213:2214"] } },
       "option": { "local": true }
     }
   }
@@ -70,9 +69,9 @@ func TestDecodeTopology(t *testing.T) {
   "node": { "hub": { "ingress": { "tunnel": 80 } }, "relay": { "ingress": { "public": 80 } } }
 }`, want: "passwords must differ"},
 		{name: "missing credential", data: strings.Replace(topology, ",\n    \"relay\": \"wss://:relay-secret@relay.example.com/relay\"", "", 1), want: "node hub: credential.relay is required"},
-		{name: "unknown linked alias", data: strings.Replace(topology, `"peer": { "git": ["2213:2214"] }`, `"peer": { "nope": ["2213:2214"] }`, 1), want: "node laptop: link.peer.nope: node peer has no egress alias nope"},
-		// Even without aliases, a link must name an existing node.
-		{name: "unknown linked node", data: strings.Replace(topology, `"peer": { "git": ["2213:2214"] }`, `"ghost": {}`, 1), want: "node laptop: link.ghost: no such node"},
+		{name: "unknown forwarded alias", data: strings.Replace(topology, `"peer": { "git": ["2213:2214"] }`, `"peer": { "nope": ["2213:2214"] }`, 1), want: "node laptop: forward.peer.nope: node peer has no egress alias nope"},
+		// Even without aliases, a forward must name an existing node.
+		{name: "unknown forwarded node", data: strings.Replace(topology, `"peer": { "git": ["2213:2214"] }`, `"ghost": {}`, 1), want: "node laptop: forward.ghost: no such node"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := decodeTopology(strings.NewReader(tt.data))
@@ -104,22 +103,22 @@ func TestLoadTopology(t *testing.T) {
 }
 
 // A node holds the credentials of the endpoints it has or uses: the hub serves
-// tunnel, other nodes with egress or link connect to it, optionally through
+// tunnel, other nodes with egress or forward connect to it, optionally through
 // relay, and public and proxy ingress use relay.
 func TestUsedCredentials(t *testing.T) {
 	egress := map[netutil.Label]netutil.Address{"git": mustAddress(t, "192.0.2.11")}
-	link := map[netutil.Label]map[netutil.Label][]PortMapping{"hub": {"nas": {{Listen: 1028, Target: 22}}}}
+	forward := map[netutil.Label]map[netutil.Label][]PortMapping{"hub": {"nas": {{Listen: 1028, Target: 22}}}}
 	for _, tt := range []struct {
 		name          string
 		node          Node
 		tunnel, relay bool
 	}{
-		{"hub", Node{Ingress: Ingress{Tunnel: 80}, Egress: egress, Link: link}, true, false},
+		{"hub", Node{Ingress: Ingress{Tunnel: 80}, Egress: egress, Forward: forward}, true, false},
 		{"hub ignores option.relay", Node{Ingress: Ingress{Tunnel: 80}, Egress: egress, Option: Options{Relay: true}}, true, false},
 		{"hub with relay proxy", Node{Ingress: Ingress{Tunnel: 80, Proxy: 1080}}, true, true},
 		{"egress", Node{Egress: egress}, true, false},
 		{"egress through relay", Node{Egress: egress, Option: Options{Relay: true}}, true, true},
-		{"link through relay", Node{Link: link, Option: Options{Relay: true}}, true, true},
+		{"forward through relay", Node{Forward: forward, Option: Options{Relay: true}}, true, true},
 		{"public", Node{Ingress: Ingress{Public: 80}}, false, true},
 		{"private", Node{Ingress: Ingress{Private: 2000}}, false, false},
 		{"option.relay without hub connection", Node{Ingress: Ingress{Private: 2000}, Option: Options{Relay: true}}, false, false},

@@ -104,22 +104,15 @@ func assemble(cfg config.Config) (servers []server, spoke *tunnel.Spoke) {
 			slog.With("server", "ingress.proxy"),
 		).serve)
 	}
-	// listen serves the local port of each mapping, joining it with host at the
-	// mapping's target port, as dial reaches it.
-	listen := func(name string, host netutil.Address, mappings []config.PortMapping, dial dialFunc) {
-		log := slog.With("server", name)
-		for _, m := range mappings {
-			add(name, m.Listen, tcpHandler{host: host, port: m.Target, dial: dial, log: log}.serve)
-		}
-	}
-	for _, alias := range slices.Sorted(maps.Keys(cfg.Forward)) {
-		listen("forward."+string(alias), cfg.Egress[alias], cfg.Forward[alias], dialDirect)
-	}
-	for _, node := range slices.Sorted(maps.Keys(cfg.Link)) {
-		for _, alias := range slices.Sorted(maps.Keys(cfg.Link[node])) {
+	for _, node := range slices.Sorted(maps.Keys(cfg.Forward)) {
+		for _, alias := range slices.Sorted(maps.Keys(cfg.Forward[node])) {
+			name := "forward." + string(node) + "." + string(alias)
+			log := slog.With("server", name)
 			// Two labels always make a valid domain.
 			virtual, _ := netutil.DomainAddress(tunnel.Target{Kind: tunnel.Route, Node: node, Alias: alias}.Domain())
-			listen("link."+string(node)+"."+string(alias), virtual, cfg.Link[node][alias], r.dialTunnel)
+			for _, m := range cfg.Forward[node][alias] {
+				add(name, m.Listen, tcpHandler{host: virtual, port: m.Target, dial: r.dialTunnel, log: log}.serve)
+			}
 		}
 	}
 

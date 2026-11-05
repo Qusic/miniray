@@ -7,7 +7,7 @@ import (
 )
 
 // server is one local address and how the connections accepted there are
-// served. Its name, such as ingress.tunnel or link.lab.nas, labels its
+// served. Its name, such as ingress.tunnel or forward.lab.nas, labels its
 // errors and logs.
 type server struct {
 	name  string
